@@ -1,4 +1,4 @@
-# zig-ipfs
+# zipfs
 
 An [IPFS](https://ipfs.tech/)-style content-addressed storage node written in [Zig](https://ziglang.org/). It implements local UnixFS-style files and directories, a blockstore, CID v0/v1, and enough **Kubo-compatible libp2p wire formats** (Noise, yamux, multistream, bitswap 1.2.0, Kademlia DHT, Identify) to **dial the public network**, **serve inbound peers**, and **fetch or provide** content in a way that interoperates with mainstream IPFS nodes.
 
