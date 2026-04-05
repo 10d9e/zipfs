@@ -1,6 +1,8 @@
 # zipfs
 
-An [IPFS](https://ipfs.tech/)-style content-addressed storage node written in [Zig](https://ziglang.org/). It implements local UnixFS-style files and directories, a blockstore, CID v0/v1, and enough **Kubo-compatible libp2p wire formats** (Noise, yamux, multistream, bitswap 1.2.0, Kademlia DHT, Identify) to **dial the public network**, **serve inbound peers**, and **fetch or provide** content in a way that interoperates with mainstream IPFS nodes.
+<img width="778" height="639" alt="zipfs" src="https://github.com/user-attachments/assets/08870e43-14f6-43d7-b195-35fc80d9bd72" />
+
+An [IPFS](https://ipfs.tech/) content-addressed node written in [Zig](https://ziglang.org/). It implements local UnixFS-style files and directories, a blockstore, CID v0/v1, and enough **Kubo-compatible libp2p wire formats** (Noise, yamux, multistream, bitswap 1.2.0, Kademlia DHT, Identify) to **dial the public network**, **serve inbound peers**, and **fetch or provide** content in a way that interoperates with mainstream IPFS nodes.
 
 This is **not** a full Kubo replacement: scope is intentionally smaller, but the project aims for correct stacks and keyspaces where it touches the network.
 
