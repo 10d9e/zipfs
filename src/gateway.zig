@@ -157,7 +157,7 @@ fn parseMultipartFile(body: []const u8, boundary: []const u8) ?struct { data: []
 /// `initial_body` is the portion already read after headers.
 /// Returns allocated body buffer that caller must free.
 fn readFullBody(allocator: std.mem.Allocator, stream: std.net.Stream, content_length: usize, initial_body: []const u8) ![]u8 {
-    const max_body: usize = 100 * 1024 * 1024; // 100MB
+    const max_body: usize = 10 * 1024 * 1024 * 1024; // 10GB
     if (content_length > max_body) return error.PayloadTooLarge;
 
     const body_buf = try allocator.alloc(u8, content_length);
@@ -218,7 +218,7 @@ fn handleAdd(allocator: std.mem.Allocator, ctx: *const GatewayCtx, stream: std.n
     // Read full body
     const body = readFullBody(allocator, stream, content_length, initial_body) catch |err| switch (err) {
         error.PayloadTooLarge => {
-            sendResp(stream, "HTTP/1.1 413 Payload Too Large", "text/plain", "max upload size is 100MB\n");
+            sendResp(stream, "HTTP/1.1 413 Payload Too Large", "text/plain", "max upload size is 10GB\n");
             return;
         },
         else => {
