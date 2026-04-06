@@ -711,9 +711,11 @@ pub fn main() !void {
                 cstate.addPeer("unknown", addr) catch {};
             }
 
-            try zipfs.replication.replicateCid(gpa, &cstate, &node.store, cid_str, factor, cfg.cluster_secret, sec);
+            // factor = total copies; subtract 1 for origin to get peer target
+            const peer_target: u8 = if (factor > 1) factor - 1 else 1;
+            try zipfs.replication.replicateCid(gpa, &cstate, &node.store, cid_str, peer_target, cfg.cluster_secret, sec);
             try cstate.save(repo_root);
-            try stderr.print("replicate {s} (factor={d}) initiated\n", .{ cid_str, factor });
+            try stderr.print("replicate {s} (factor={d}, peers={d}) initiated\n", .{ cid_str, factor, peer_target });
             return;
         }
         if (std.mem.eql(u8, sub, "shard")) {

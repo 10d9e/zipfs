@@ -201,12 +201,14 @@ fn processItem(allocator: std.mem.Allocator, ctx: *SchedulerCtx, item: *ReplItem
         switch (item.mode) {
             .replicate => {
                 const factor = if (item.replication_factor > 0) item.replication_factor else ctx.replication_factor;
+                // factor = total copies; subtract 1 for the origin node to get peer count
+                const peer_count: u8 = if (factor > 1) factor - 1 else 1;
                 replication.replicateCid(
                     allocator,
                     &state,
                     ctx.store,
                     item.cid,
-                    factor,
+                    peer_count,
                     ctx.cluster_secret,
                     ctx.ed25519_secret64,
                 ) catch {

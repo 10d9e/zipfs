@@ -604,10 +604,12 @@ pub fn selfHealOnce(allocator: std.mem.Allocator, ctx: *SelfHealCtx) !void {
     const replicas_exist = (state.replicas.count() > 0);
 
     // New pins -> create replica records (always safe to add)
+    // replication_factor = total copies; subtract 1 for origin to get peer target
+    const peer_target: u8 = if (ctx.replication_factor > 1) ctx.replication_factor - 1 else 1;
     var pin_it = pins.recursive.keyIterator();
     while (pin_it.next()) |k| {
         if (!state.replicas.contains(k.*)) {
-            _ = state.upsertReplica(k.*, ctx.cluster_mode, ctx.replication_factor) catch continue;
+            _ = state.upsertReplica(k.*, ctx.cluster_mode, peer_target) catch continue;
         }
     }
 
