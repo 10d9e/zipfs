@@ -161,14 +161,19 @@ pub const Blockstore = struct {
         }
 
         // Insert new entry — single key allocation shared between slot and index
-        const key_dup = ca.dupe(u8, key) catch return;
+        const key_dup = ca.dupe(u8, key) catch {
+            std.log.warn("blockstore cache: OOM allocating key ({d} bytes)", .{key.len});
+            return;
+        };
         const data_dup = ca.dupe(u8, data) catch {
+            std.log.warn("blockstore cache: OOM allocating data ({d} bytes)", .{data.len});
             ca.free(key_dup);
             return;
         };
 
         slots[pos] = .{ .key = key_dup, .data = data_dup };
         self.cache_index.put(ca, key_dup, pos) catch {
+            std.log.warn("blockstore cache: OOM inserting index entry", .{});
             ca.free(key_dup);
             ca.free(data_dup);
             slots[pos] = null;

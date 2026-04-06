@@ -325,10 +325,10 @@ fn handleId(allocator: std.mem.Allocator, ctx: *const GatewayCtx, stream: std.ne
     addrs_buf.appendSlice(allocator, "[") catch return;
     const all_addrs = if (ctx.announce_addrs.len > 0) ctx.announce_addrs else ctx.listen_addrs;
     for (all_addrs, 0..) |addr, i| {
-        if (i > 0) addrs_buf.appendSlice(allocator, ",") catch continue;
-        addrs_buf.appendSlice(allocator, "\"") catch continue;
-        addrs_buf.appendSlice(allocator, addr) catch continue;
-        addrs_buf.appendSlice(allocator, "\"") catch continue;
+        if (i > 0) addrs_buf.appendSlice(allocator, ",") catch return;
+        addrs_buf.appendSlice(allocator, "\"") catch return;
+        addrs_buf.appendSlice(allocator, addr) catch return;
+        addrs_buf.appendSlice(allocator, "\"") catch return;
     }
     addrs_buf.appendSlice(allocator, "]") catch return;
 
@@ -337,10 +337,10 @@ fn handleId(allocator: std.mem.Allocator, ctx: *const GatewayCtx, stream: std.ne
     defer peers_buf.deinit(allocator);
     peers_buf.appendSlice(allocator, "[") catch return;
     for (ctx.cluster_peers, 0..) |peer, i| {
-        if (i > 0) peers_buf.appendSlice(allocator, ",") catch continue;
-        peers_buf.appendSlice(allocator, "\"") catch continue;
-        peers_buf.appendSlice(allocator, peer) catch continue;
-        peers_buf.appendSlice(allocator, "\"") catch continue;
+        if (i > 0) peers_buf.appendSlice(allocator, ",") catch return;
+        peers_buf.appendSlice(allocator, "\"") catch return;
+        peers_buf.appendSlice(allocator, peer) catch return;
+        peers_buf.appendSlice(allocator, "\"") catch return;
     }
     peers_buf.appendSlice(allocator, "]") catch return;
 
@@ -445,11 +445,12 @@ fn handleConnection(ctx: *const GatewayCtx, stream: std.net.Stream, active: *std
     const cid_str = rest[0..slash];
     const subpath = if (slash < rest.len) rest[slash + 1 ..] else "";
 
-    if (ctx.store_sync) |m| m.lock();
-    defer if (ctx.store_sync) |m| m.unlock();
-
     blk_dir: {
-        var dir = resolver.listDirAtPath(allocator, ctx.store, cid_str, subpath) catch break :blk_dir;
+        var dir = blk: {
+            if (ctx.store_sync) |m| m.lock();
+            defer if (ctx.store_sync) |m| m.unlock();
+            break :blk resolver.listDirAtPath(allocator, ctx.store, cid_str, subpath) catch break :blk_dir;
+        };
         defer dir.deinit();
         var html = std.ArrayList(u8).empty;
         defer html.deinit(allocator);
@@ -463,19 +464,23 @@ fn handleConnection(ctx: *const GatewayCtx, stream: std.net.Stream, active: *std
         return;
     }
 
-    const body = resolver.catFileAtPath(allocator, ctx.store, cid_str, subpath) catch |err| switch (err) {
-        error.NotFound => {
-            sendResp(stream, "HTTP/1.1 404 Not Found", "text/plain", "not found\n");
-            return;
-        },
-        error.NotADirectory => {
-            sendResp(stream, "HTTP/1.1 400 Bad Request", "text/plain", "bad request\n");
-            return;
-        },
-        else => {
-            sendResp(stream, "HTTP/1.1 500 Internal Server Error", "text/plain", "error\n");
-            return;
-        },
+    const body = blk2: {
+        if (ctx.store_sync) |m| m.lock();
+        defer if (ctx.store_sync) |m| m.unlock();
+        break :blk2 resolver.catFileAtPath(allocator, ctx.store, cid_str, subpath) catch |err| switch (err) {
+            error.NotFound => {
+                sendResp(stream, "HTTP/1.1 404 Not Found", "text/plain", "not found\n");
+                return;
+            },
+            error.NotADirectory => {
+                sendResp(stream, "HTTP/1.1 400 Bad Request", "text/plain", "bad request\n");
+                return;
+            },
+            else => {
+                sendResp(stream, "HTTP/1.1 500 Internal Server Error", "text/plain", "error\n");
+                return;
+            },
+        };
     };
     defer allocator.free(body);
     sendResp(stream, "HTTP/1.1 200 OK", "application/octet-stream", body);

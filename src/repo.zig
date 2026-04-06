@@ -31,7 +31,13 @@ pub fn readBlockFromDisk(allocator: std.mem.Allocator, repo_root: []const u8, ci
 pub fn blockExistsOnDisk(repo_root: []const u8, cid_key: []const u8) bool {
     const path = joinBlocksPath(std.heap.page_allocator, repo_root, cid_key) catch return false;
     defer std.heap.page_allocator.free(path);
-    std.fs.cwd().access(path, .{}) catch return false;
+    std.fs.cwd().access(path, .{}) catch |err| {
+        switch (err) {
+            error.FileNotFound => {},
+            else => std.log.warn("blockExistsOnDisk: access error for {s}: {}", .{ cid_key, err }),
+        }
+        return false;
+    };
     return true;
 }
 

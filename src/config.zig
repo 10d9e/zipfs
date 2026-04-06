@@ -256,8 +256,33 @@ pub const Config = struct {
         try buf.append(allocator, '\n');
         const path = try std.fs.path.join(allocator, &.{ repo_root, "config.json" });
         defer allocator.free(path);
+        const tmp_path = try std.fs.path.join(allocator, &.{ repo_root, "config.json.tmp" });
+        defer allocator.free(tmp_path);
         try std.fs.cwd().makePath(repo_root);
-        try std.fs.cwd().writeFile(.{ .sub_path = path, .data = buf.items });
+        // Atomic write: temp file + fsync + rename
+        const file = try std.fs.cwd().createFile(tmp_path, .{ .truncate = true });
+        file.writeAll(buf.items) catch |e| {
+            file.close();
+            return e;
+        };
+        file.sync() catch |e| {
+            file.close();
+            return e;
+        };
+        file.close();
+        std.fs.cwd().rename(tmp_path, path) catch {
+            // Fallback: direct write with fsync if rename fails (e.g. cross-device)
+            const fb = try std.fs.cwd().createFile(path, .{ .truncate = true });
+            fb.writeAll(buf.items) catch |e2| {
+                fb.close();
+                return e2;
+            };
+            fb.sync() catch |e2| {
+                fb.close();
+                return e2;
+            };
+            fb.close();
+        };
     }
 
     /// Allocated listen + bootstrap defaults suitable for `config init`.

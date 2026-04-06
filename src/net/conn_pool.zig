@@ -159,6 +159,8 @@ pub const ConnPool = struct {
         defer self.mu.unlock();
         if (self.pool.getPtr(key)) |c| {
             c.last_used_ns = std.time.nanoTimestamp();
+        } else {
+            std.log.debug("conn_pool: release called for evicted key: {s}", .{key});
         }
     }
 
