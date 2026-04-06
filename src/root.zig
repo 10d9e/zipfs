@@ -38,6 +38,7 @@ pub const net_swarm_config = @import("net/swarm_config.zig");
 pub const net_identify = @import("net/identify.zig");
 pub const net_bootstrap_resolve = @import("net/bootstrap_resolve.zig");
 pub const net_cluster_push = @import("net/cluster_push.zig");
+pub const net_conn_pool = @import("net/conn_pool.zig");
 pub const cluster = @import("cluster.zig");
 pub const replication = @import("replication.zig");
 pub const repl_queue = @import("repl_queue.zig");
@@ -61,15 +62,15 @@ pub const Node = struct {
         return importer.addFileWithChunk(allocator, &self.store, data, cfg.chunk_size);
     }
 
-    pub fn catFile(self: *const Node, allocator: std.mem.Allocator, cid_str: []const u8) ![]u8 {
+    pub fn catFile(self: *Node, allocator: std.mem.Allocator, cid_str: []const u8) ![]u8 {
         return resolver.catFile(allocator, &self.store, cid_str);
     }
 
-    pub fn catFileAtPath(self: *const Node, allocator: std.mem.Allocator, cid_str: []const u8, path: []const u8) ![]u8 {
+    pub fn catFileAtPath(self: *Node, allocator: std.mem.Allocator, cid_str: []const u8, path: []const u8) ![]u8 {
         return resolver.catFileAtPath(allocator, &self.store, cid_str, path);
     }
 
-    pub fn listDir(self: *const Node, allocator: std.mem.Allocator, cid_str: []const u8, path: []const u8) !resolver.DirList {
+    pub fn listDir(self: *Node, allocator: std.mem.Allocator, cid_str: []const u8, path: []const u8) !resolver.DirList {
         return resolver.listDirAtPath(allocator, &self.store, cid_str, path);
     }
 
@@ -84,9 +85,8 @@ pub const Node = struct {
         return id;
     }
 
-    pub fn blockGet(self: *const Node, allocator: std.mem.Allocator, cid_str: []const u8) ![]u8 {
-        const b = self.store.get(cid_str) orelse return error.NotFound;
-        return try allocator.dupe(u8, b);
+    pub fn blockGet(self: *Node, allocator: std.mem.Allocator, cid_str: []const u8) ![]u8 {
+        return self.store.get(allocator, cid_str) orelse return error.NotFound;
     }
 };
 

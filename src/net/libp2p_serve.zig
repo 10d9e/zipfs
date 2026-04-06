@@ -198,9 +198,7 @@ fn advanceStream(
 
                 for (want_items) |wi| {
                     mu.lock();
-                    const raw = store.get(wi.store_key);
-                    // Dupe data while holding lock to prevent dangling pointer
-                    const data_copy = if (raw) |d| allocator.dupe(u8, d) catch null else null;
+                    const data_copy = store.get(allocator, wi.store_key);
                     mu.unlock();
 
                     switch (wi.want_type) {
@@ -210,7 +208,7 @@ fn advanceStream(
                             const kdup = try allocator.dupe(u8, wi.store_key);
                             errdefer allocator.free(kdup);
                             try have_presence_key.put(allocator, kdup, {});
-                            const typ: bitswap.BlockPresenceType = if (raw != null) .have else .dont_have;
+                            const typ: bitswap.BlockPresenceType = if (data_copy != null) .have else .dont_have;
                             try appendPresenceForStoreKey(allocator, &pres, wi.store_key, typ);
                         },
                         .block => {
@@ -328,7 +326,7 @@ fn advanceStream(
                             const key = c.toString(allocator) catch continue;
                             defer allocator.free(key);
                             mu.lock();
-                            const has_block = store.get(key) != null;
+                            const has_block = store.has(key);
                             mu.unlock();
                             if (has_block) {
                                 have_list.append(allocator, cid_bytes) catch continue;

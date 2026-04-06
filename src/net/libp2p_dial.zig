@@ -207,7 +207,7 @@ pub const YamuxOverNoise = struct {
     }
 };
 
-fn multistreamSelectPlain(stream: std.net.Stream, buf: []u8) !void {
+pub fn multistreamSelectPlain(stream: std.net.Stream, buf: []u8) !void {
     try multistream.writeProtocol(stream, multistream.multistream_1_0);
     const a = try multistream.readLine(stream, buf);
     if (!std.mem.eql(u8, a, multistream.multistream_1_0[0 .. multistream.multistream_1_0.len - 1]))
@@ -224,7 +224,7 @@ pub fn multistreamRespondNoise(stream: std.net.Stream, buf: []u8) !void {
     try multistream.writeProtocol(stream, proto_noise);
 }
 
-fn negotiateYamuxOnNoise(s: *noise.Session, allocator: std.mem.Allocator) !void {
+pub fn negotiateYamuxOnNoise(s: *noise.Session, allocator: std.mem.Allocator) !void {
     try writeLineNoise(s, allocator, multistream.multistream_1_0);
     const l1 = try readLineNoise(s, allocator);
     defer allocator.free(l1);

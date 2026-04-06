@@ -6,6 +6,7 @@ const cluster_mod = @import("cluster.zig");
 const replication = @import("replication.zig");
 const blockstore_mod = @import("blockstore.zig");
 const cluster_push = @import("net/cluster_push.zig");
+const conn_pool = @import("net/conn_pool.zig");
 
 
 const ReplQueue = repl_queue.ReplQueue;
@@ -36,6 +37,8 @@ pub const SchedulerCtx = struct {
     cluster_peers: []const []const u8 = &.{},
     /// Mutex guarding ClusterState load/save to prevent concurrent file access races.
     state_mu: ?*std.Thread.Mutex = null,
+    /// Connection pool for reusing Yamux connections to cluster peers.
+    pool: ?*conn_pool.ConnPool = null,
 };
 
 /// Inbox poller loop: reads CIDs from the repl_inbox file and enqueues them.
@@ -63,7 +66,7 @@ fn recoverStrandedInbox(allocator: std.mem.Allocator, repo_root: []const u8) voi
     defer allocator.free(ip);
 
     // Read the stranded processing file
-    const data = std.fs.cwd().readFileAlloc(allocator, pp, 1 << 20) catch {
+    const data = std.fs.cwd().readFileAlloc(allocator, pp, 8 << 20) catch {
         // No processing file or can't read — nothing to recover
         return;
     };
@@ -107,7 +110,7 @@ fn drainInbox(allocator: std.mem.Allocator, ctx: *SchedulerCtx) void {
     };
 
     // Read from the renamed (now-exclusive) file
-    const data = std.fs.cwd().readFileAlloc(allocator, proc_path, 1 << 20) catch {
+    const data = std.fs.cwd().readFileAlloc(allocator, proc_path, 8 << 20) catch {
         // Rename back on read failure so data isn't lost
         std.fs.cwd().rename(proc_path, path) catch {};
         return;
@@ -157,9 +160,15 @@ pub fn schedulerLoop(ctx: *SchedulerCtx) void {
     defer _ = gpa_state.deinit();
     const allocator = gpa_state.allocator();
 
+    var last_evict_ns: i128 = std.time.nanoTimestamp();
+
     while (true) {
         const batch = ctx.queue.popBatch(ctx.batch_size, 5 * std.time.ns_per_s);
-        if (batch.len == 0) continue;
+        if (batch.len == 0) {
+            // Evict stale pooled connections periodically (every 60s)
+            evictStaleConnections(ctx, &last_evict_ns);
+            continue;
+        }
 
         // Process each item in the batch
         for (batch) |*item| {
@@ -170,6 +179,21 @@ pub fn schedulerLoop(ctx: *SchedulerCtx) void {
         }
 
         ctx.queue.allocator.free(batch);
+
+        // Evict stale pooled connections periodically (every 60s)
+        evictStaleConnections(ctx, &last_evict_ns);
+    }
+}
+
+/// Evict stale pooled connections if 60 seconds have passed since last eviction.
+fn evictStaleConnections(ctx: *SchedulerCtx, last_evict_ns: *i128) void {
+    const now = std.time.nanoTimestamp();
+    const evict_interval_ns: i128 = 60 * std.time.ns_per_s;
+    if (now - last_evict_ns.* >= evict_interval_ns) {
+        if (ctx.pool) |pool| {
+            pool.evictStale(evict_interval_ns);
+        }
+        last_evict_ns.* = now;
     }
 }
 
@@ -292,15 +316,28 @@ fn pushToPeer(
     };
     defer allocator.free(hp.host);
 
-    _ = cluster_push.dialClusterPush(
-        allocator,
-        hp.host,
-        hp.port,
-        cid_str,
-        entries,
-        ctx.cluster_secret,
-        ctx.ed25519_secret64,
-    ) catch {
+    const push_fn = if (ctx.pool) |pool|
+        cluster_push.dialClusterPushPooled(
+            allocator,
+            pool,
+            hp.host,
+            hp.port,
+            cid_str,
+            entries,
+            ctx.cluster_secret,
+            ctx.ed25519_secret64,
+        )
+    else
+        cluster_push.dialClusterPush(
+            allocator,
+            hp.host,
+            hp.port,
+            cid_str,
+            entries,
+            ctx.cluster_secret,
+            ctx.ed25519_secret64,
+        );
+    _ = push_fn catch {
         // Re-enqueue as retry
         reEnqueueWithRetry(ctx, cid_str, mode, .retry_low, peer_addr, shard_index, retry_count);
         return;

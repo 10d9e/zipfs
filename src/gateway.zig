@@ -4,7 +4,6 @@ const std = @import("std");
 const Blockstore = @import("blockstore.zig").Blockstore;
 const resolver = @import("resolver.zig");
 const importer = @import("importer.zig");
-const repo = @import("repo.zig");
 const pin = @import("pin.zig");
 
 /// Context for the gateway server, carrying mutable state needed for writes.
@@ -24,6 +23,8 @@ pub const GatewayCtx = struct {
     cluster_peers: []const []const u8 = &.{},
     /// Replication factor (0 = not configured).
     replication_factor: u8 = 0,
+    /// Max concurrent connections (default 64).
+    max_conns: u32 = 64,
 };
 
 fn sendResp(stream: std.net.Stream, status: []const u8, content_type: []const u8, body: []const u8) void {
@@ -246,11 +247,6 @@ fn handleAdd(allocator: std.mem.Allocator, ctx: *const GatewayCtx, stream: std.n
         };
         defer root_cid.deinit(allocator);
 
-        // Export to disk repo
-        repo.exportStore(ctx.store, ctx.repo_root) catch |err| {
-            std.log.err("exportStore failed: {}", .{err});
-        };
-
         // Copy CID string to stack buffer so it outlives the lock scope
         const cid_str_tmp = root_cid.toString(allocator) catch {
             sendResp(stream, "HTTP/1.1 500 Internal Server Error", "text/plain", "cid encoding failed\n");
@@ -364,14 +360,136 @@ fn handleId(allocator: std.mem.Allocator, ctx: *const GatewayCtx, stream: std.ne
     );
 }
 
-/// Blocking loop: accept connections and serve `/ipfs/...` reads + `/api/v0/add` writes.
-pub fn run(allocator: std.mem.Allocator, ctx: *const GatewayCtx) !void {
+/// Handle a single connection in its own thread.
+fn handleConnection(ctx: *const GatewayCtx, stream: std.net.Stream, active: *std.atomic.Value(u32)) void {
+    defer stream.close();
+    defer _ = active.fetchSub(1, .release);
+
+    // Per-thread allocator (page_allocator avoids GPA contention)
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var buf: [65536]u8 = undefined;
+    const n = stream.read(&buf) catch return;
+    if (n == 0) return;
+    const req = buf[0..n];
+
+    // Find end of request line
+    const line_end = std.mem.indexOf(u8, req, "\r\n") orelse return;
+    const line = req[0..line_end];
+    if (line.len < 10) return;
+
+    // Determine method
+    const is_get = std.mem.startsWith(u8, line, "GET ");
+    const is_post = std.mem.startsWith(u8, line, "POST ");
+    if (!is_get and !is_post) {
+        sendResp(stream, "HTTP/1.1 405 Method Not Allowed", "text/plain", "method not allowed\n");
+        return;
+    }
+
+    // Parse target path
+    const method_len: usize = if (is_get) 4 else 5;
+    const path_end = std.mem.indexOfScalar(u8, line[method_len..], ' ') orelse return;
+    const target = line[method_len .. method_len + path_end];
+
+    // Find headers section (everything after request line)
+    const headers = req[line_end + 2 ..];
+
+    // Route: POST /api/v0/add or POST /api/v0/id
+    if (is_post) {
+        const target_path = if (std.mem.indexOf(u8, target, "?")) |q| target[0..q] else target;
+        if (std.mem.eql(u8, target_path, "/api/v0/add")) {
+            // Find where body starts (after \r\n\r\n)
+            const hdrs_end = std.mem.indexOf(u8, req, "\r\n\r\n") orelse return;
+            const body_start = hdrs_end + 4;
+            const initial_body = if (body_start < n) req[body_start..n] else "";
+            handleAdd(allocator, ctx, stream, headers, initial_body, target);
+            return;
+        }
+        if (std.mem.eql(u8, target_path, "/api/v0/id")) {
+            handleId(allocator, ctx, stream);
+            return;
+        }
+        sendResp(stream, "HTTP/1.1 404 Not Found", "text/plain", "not found\n");
+        return;
+    }
+
+    // Route: GET /api/v0/id
+    {
+        const get_path = if (std.mem.indexOf(u8, target, "?")) |q| target[0..q] else target;
+        if (std.mem.eql(u8, get_path, "/api/v0/id")) {
+            handleId(allocator, ctx, stream);
+            return;
+        }
+    }
+
+    // Route: GET /health (for Railway/Docker healthchecks)
+    if (std.mem.eql(u8, target, "/health") or std.mem.eql(u8, target, "/")) {
+        sendResp(stream, "HTTP/1.1 200 OK", "text/plain", "ok\n");
+        return;
+    }
+
+    // Route: GET /ipfs/...
+    if (!std.mem.startsWith(u8, target, "/ipfs/")) {
+        if (std.mem.startsWith(u8, target, "/ipns/")) {
+            sendResp(stream, "HTTP/1.1 501 Not Implemented", "text/plain", "ipns not enabled\n");
+            return;
+        }
+        sendResp(stream, "HTTP/1.1 404 Not Found", "text/plain", "not found\n");
+        return;
+    }
+
+    const rest = target["/ipfs/".len..];
+    const slash = std.mem.indexOfScalar(u8, rest, '/') orelse rest.len;
+    const cid_str = rest[0..slash];
+    const subpath = if (slash < rest.len) rest[slash + 1 ..] else "";
+
+    if (ctx.store_sync) |m| m.lock();
+    defer if (ctx.store_sync) |m| m.unlock();
+
+    blk_dir: {
+        var dir = resolver.listDirAtPath(allocator, ctx.store, cid_str, subpath) catch break :blk_dir;
+        defer dir.deinit();
+        var html = std.ArrayList(u8).empty;
+        defer html.deinit(allocator);
+        const w = html.writer(allocator);
+        w.writeAll("<!DOCTYPE html><html><body><ul>\n") catch break :blk_dir;
+        for (dir.entries) |e| {
+            w.print("<li><a href=\"{s}/{s}\">{s}</a> ({d} bytes)</li>\n", .{ target, e.name, e.name, e.size }) catch break :blk_dir;
+        }
+        w.writeAll("</ul></body></html>\n") catch break :blk_dir;
+        sendResp(stream, "HTTP/1.1 200 OK", "text/html; charset=utf-8", html.items);
+        return;
+    }
+
+    const body = resolver.catFileAtPath(allocator, ctx.store, cid_str, subpath) catch |err| switch (err) {
+        error.NotFound => {
+            sendResp(stream, "HTTP/1.1 404 Not Found", "text/plain", "not found\n");
+            return;
+        },
+        error.NotADirectory => {
+            sendResp(stream, "HTTP/1.1 400 Bad Request", "text/plain", "bad request\n");
+            return;
+        },
+        else => {
+            sendResp(stream, "HTTP/1.1 500 Internal Server Error", "text/plain", "error\n");
+            return;
+        },
+    };
+    defer allocator.free(body);
+    sendResp(stream, "HTTP/1.1 200 OK", "application/octet-stream", body);
+}
+
+/// Multi-threaded accept loop: spawns a thread per connection up to max_conns.
+pub fn run(_: std.mem.Allocator, ctx: *const GatewayCtx) !void {
     const addr = try std.net.Address.parseIp("0.0.0.0", ctx.port);
     var server = try addr.listen(.{ .reuse_address = true });
     defer server.deinit();
 
-    var buf: [65536]u8 = undefined;
-    accept: while (true) {
+    var active = std.atomic.Value(u32).init(0);
+
+    while (true) {
         const conn = server.accept() catch |err| switch (err) {
             error.ConnectionAborted => continue,
             error.ProcessFdQuotaExceeded, error.SystemFdQuotaExceeded => {
@@ -381,115 +499,19 @@ pub fn run(allocator: std.mem.Allocator, ctx: *const GatewayCtx) !void {
             },
             else => |e| return e,
         };
-        defer conn.stream.close();
 
-        const n = conn.stream.read(&buf) catch continue;
-        if (n == 0) continue;
-        const req = buf[0..n];
-
-        // Find end of request line
-        const line_end = std.mem.indexOf(u8, req, "\r\n") orelse continue;
-        const line = req[0..line_end];
-        if (line.len < 10) continue;
-
-        // Determine method
-        const is_get = std.mem.startsWith(u8, line, "GET ");
-        const is_post = std.mem.startsWith(u8, line, "POST ");
-        if (!is_get and !is_post) {
-            sendResp(conn.stream, "HTTP/1.1 405 Method Not Allowed", "text/plain", "method not allowed\n");
+        // Enforce concurrency limit
+        if (active.load(.acquire) >= ctx.max_conns) {
+            conn.stream.close();
             continue;
         }
+        _ = active.fetchAdd(1, .release);
 
-        // Parse target path
-        const method_len: usize = if (is_get) 4 else 5;
-        const path_end = std.mem.indexOfScalar(u8, line[method_len..], ' ') orelse continue;
-        const target = line[method_len .. method_len + path_end];
-
-        // Find headers section (everything after request line)
-        const headers = req[line_end + 2 ..];
-
-        // Route: POST /api/v0/add or POST /api/v0/id
-        if (is_post) {
-            const target_path = if (std.mem.indexOf(u8, target, "?")) |q| target[0..q] else target;
-            if (std.mem.eql(u8, target_path, "/api/v0/add")) {
-                // Find where body starts (after \r\n\r\n)
-                const hdrs_end = std.mem.indexOf(u8, req, "\r\n\r\n") orelse continue;
-                const body_start = hdrs_end + 4;
-                const initial_body = if (body_start < n) req[body_start..n] else "";
-                handleAdd(allocator, ctx, conn.stream, headers, initial_body, target);
-                continue;
-            }
-            if (std.mem.eql(u8, target_path, "/api/v0/id")) {
-                handleId(allocator, ctx, conn.stream);
-                continue;
-            }
-            sendResp(conn.stream, "HTTP/1.1 404 Not Found", "text/plain", "not found\n");
+        const t = std.Thread.spawn(.{}, handleConnection, .{ ctx, conn.stream, &active }) catch {
+            _ = active.fetchSub(1, .release);
+            conn.stream.close();
             continue;
-        }
-
-        // Route: GET /api/v0/id
-        {
-            const get_path = if (std.mem.indexOf(u8, target, "?")) |q| target[0..q] else target;
-            if (std.mem.eql(u8, get_path, "/api/v0/id")) {
-                handleId(allocator, ctx, conn.stream);
-                continue;
-            }
-        }
-
-        // Route: GET /health (for Railway/Docker healthchecks)
-        if (std.mem.eql(u8, target, "/health") or std.mem.eql(u8, target, "/")) {
-            sendResp(conn.stream, "HTTP/1.1 200 OK", "text/plain", "ok\n");
-            continue;
-        }
-
-        // Route: GET /ipfs/...
-        if (!std.mem.startsWith(u8, target, "/ipfs/")) {
-            if (std.mem.startsWith(u8, target, "/ipns/")) {
-                sendResp(conn.stream, "HTTP/1.1 501 Not Implemented", "text/plain", "ipns not enabled\n");
-                continue;
-            }
-            sendResp(conn.stream, "HTTP/1.1 404 Not Found", "text/plain", "not found\n");
-            continue;
-        }
-
-        const rest = target["/ipfs/".len..];
-        const slash = std.mem.indexOfScalar(u8, rest, '/') orelse rest.len;
-        const cid_str = rest[0..slash];
-        const subpath = if (slash < rest.len) rest[slash + 1 ..] else "";
-
-        if (ctx.store_sync) |m| m.lock();
-        defer if (ctx.store_sync) |m| m.unlock();
-
-        blk_dir: {
-            var dir = resolver.listDirAtPath(allocator, ctx.store, cid_str, subpath) catch break :blk_dir;
-            defer dir.deinit();
-            var html = std.ArrayList(u8).empty;
-            defer html.deinit(allocator);
-            const w = html.writer(allocator);
-            w.writeAll("<!DOCTYPE html><html><body><ul>\n") catch break :blk_dir;
-            for (dir.entries) |e| {
-                w.print("<li><a href=\"{s}/{s}\">{s}</a> ({d} bytes)</li>\n", .{ target, e.name, e.name, e.size }) catch break :blk_dir;
-            }
-            w.writeAll("</ul></body></html>\n") catch break :blk_dir;
-            sendResp(conn.stream, "HTTP/1.1 200 OK", "text/html; charset=utf-8", html.items);
-            continue :accept;
-        }
-
-        const body = resolver.catFileAtPath(allocator, ctx.store, cid_str, subpath) catch |err| switch (err) {
-            error.NotFound => {
-                sendResp(conn.stream, "HTTP/1.1 404 Not Found", "text/plain", "not found\n");
-                continue;
-            },
-            error.NotADirectory => {
-                sendResp(conn.stream, "HTTP/1.1 400 Bad Request", "text/plain", "bad request\n");
-                continue;
-            },
-            else => {
-                sendResp(conn.stream, "HTTP/1.1 500 Internal Server Error", "text/plain", "error\n");
-                continue;
-            },
         };
-        defer allocator.free(body);
-        sendResp(conn.stream, "HTTP/1.1 200 OK", "application/octet-stream", body);
+        t.detach();
     }
 }

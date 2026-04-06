@@ -86,7 +86,7 @@ pub fn selectPeersConsistentHash(
 /// Collect all block CID strings in a DAG recursively (including root).
 pub fn collectDagBlocks(
     allocator: std.mem.Allocator,
-    store: *const Blockstore,
+    store: *Blockstore,
     root_key: []const u8,
 ) ![][]u8 {
     var visited = std.StringHashMapUnmanaged(void).empty;
@@ -142,7 +142,7 @@ pub fn collectDagBlocks(
 /// Classify blocks into structure (dag-pb intermediate) and data (raw leaf) nodes.
 pub fn classifyBlocks(
     allocator: std.mem.Allocator,
-    store: *const Blockstore,
+    store: *Blockstore,
     block_keys: []const []const u8,
 ) !struct { structure: [][]const u8, data_blocks: [][]const u8 } {
     var structure = std.ArrayList([]const u8).empty;
@@ -194,7 +194,7 @@ pub fn shardForBlock(block_cid: []const u8, shard_count: u16) u16 {
 /// Build block entries from blockstore for a set of CID keys.
 pub fn buildBlockEntries(
     allocator: std.mem.Allocator,
-    store: *const Blockstore,
+    store: *Blockstore,
     keys: []const []const u8,
 ) ![]cluster_push.BlockEntry {
     var entries = std.ArrayList(cluster_push.BlockEntry).empty;
@@ -207,13 +207,18 @@ pub fn buildBlockEntries(
     }
 
     for (keys) |key| {
-        const data = store.get(key) orelse continue;
-        var c = Cid.parse(allocator, key) catch continue;
-        defer c.deinit(allocator);
-        const cid_bytes = c.toBytes(allocator) catch continue;
-        errdefer allocator.free(cid_bytes);
-        const data_owned = try allocator.dupe(u8, data);
+        const data_owned = store.get(allocator, key) orelse continue;
         errdefer allocator.free(data_owned);
+        var c = Cid.parse(allocator, key) catch {
+            allocator.free(data_owned);
+            continue;
+        };
+        defer c.deinit(allocator);
+        const cid_bytes = c.toBytes(allocator) catch {
+            allocator.free(data_owned);
+            continue;
+        };
+        errdefer allocator.free(cid_bytes);
         try entries.append(allocator, .{ .cid_bytes = cid_bytes, .data = data_owned });
     }
 
@@ -233,7 +238,7 @@ pub fn freeBlockEntries(allocator: std.mem.Allocator, entries: []cluster_push.Bl
 pub fn replicateCid(
     allocator: std.mem.Allocator,
     state: *ClusterState,
-    store: *const Blockstore,
+    store: *Blockstore,
     cid_str: []const u8,
     target_n: u8,
     cluster_secret: ?[]const u8,
@@ -305,7 +310,7 @@ pub fn replicateCid(
 pub fn shardCid(
     allocator: std.mem.Allocator,
     state: *ClusterState,
-    store: *const Blockstore,
+    store: *Blockstore,
     cid_str: []const u8,
     shard_count: u16,
     cluster_secret: ?[]const u8,
@@ -402,7 +407,7 @@ pub fn shardCid(
 pub fn processRetryQueue(
     allocator: std.mem.Allocator,
     state: *ClusterState,
-    store: *const Blockstore,
+    store: *Blockstore,
     cluster_secret: ?[]const u8,
     ed25519_secret64: [64]u8,
 ) void {

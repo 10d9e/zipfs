@@ -357,7 +357,7 @@ pub const ClusterState = struct {
     pub fn load(allocator: std.mem.Allocator, repo_root: []const u8) !ClusterState {
         const path = try std.fs.path.join(allocator, &.{ repo_root, "cluster_state.json" });
         defer allocator.free(path);
-        const data = std.fs.cwd().readFileAlloc(allocator, path, 4 << 20) catch |err| switch (err) {
+        const data = std.fs.cwd().readFileAlloc(allocator, path, 64 << 20) catch |err| switch (err) {
             error.FileNotFound => return ClusterState.init(allocator),
             else => |e| return e,
         };

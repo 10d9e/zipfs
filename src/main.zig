@@ -125,6 +125,7 @@ pub fn main() !void {
 
         var node: zipfs.Node = .{};
         defer node.deinit(gpa);
+        node.store.repo_root = repo_root;
         const root = if (recurse)
             try node.addDirectory(gpa, path, &cfg)
         else blk: {
@@ -133,7 +134,6 @@ pub fn main() !void {
             break :blk try node.addFileWithConfig(gpa, data, &cfg);
         };
         defer root.deinit(gpa);
-        try zipfs.repo.exportStore(&node.store, repo_root);
         const s = try root.toString(gpa);
         defer gpa.free(s);
         try std.fs.File.stdout().writeAll(s);
@@ -154,8 +154,8 @@ pub fn main() !void {
         const rpath = args.next() orelse "";
         var node: zipfs.Node = .{};
         defer node.deinit(gpa);
-        try zipfs.repo.importStore(&node.store, gpa, repo_root);
-        if (use_net and node.store.get(cid_str) == null) {
+        node.store.repo_root = repo_root;
+        if (use_net and !node.store.has(cid_str)) {
             const sec = try zipfs.net_identity.loadOrCreateSecret64(gpa, repo_root);
             const default_bs = zipfs.config.default_bootstrap_peers;
             const peers = if (cfg.bootstrap_peers.len > 0) cfg.bootstrap_peers else default_bs[0..];
@@ -163,7 +163,6 @@ pub fn main() !void {
                 try stderr.print("cat --net: fetch failed: {}\n", .{err});
                 return err;
             };
-            try zipfs.repo.exportStore(&node.store, repo_root);
         }
         const out = if (rpath.len == 0)
             try node.catFile(gpa, cid_str)
@@ -182,7 +181,7 @@ pub fn main() !void {
         const rpath = args.next() orelse "";
         var node: zipfs.Node = .{};
         defer node.deinit(gpa);
-        try zipfs.repo.importStore(&node.store, gpa, repo_root);
+        node.store.repo_root = repo_root;
         var dir = try node.listDir(gpa, cid_str, rpath);
         defer dir.deinit();
         for (dir.entries) |e| {
@@ -213,17 +212,17 @@ pub fn main() !void {
         if (std.mem.eql(u8, op, "export")) {
             var node: zipfs.Node = .{};
             defer node.deinit(gpa);
-            try zipfs.repo.importStore(&node.store, gpa, repo_root);
+            node.store.repo_root = repo_root;
             try zipfs.car.exportStoreToFile(gpa, &node.store, path);
             return;
         }
         if (std.mem.eql(u8, op, "import")) {
             var node: zipfs.Node = .{};
             defer node.deinit(gpa);
+            node.store.repo_root = repo_root;
             var f = try std.fs.cwd().openFile(path, .{});
             defer f.close();
             try zipfs.car.importFromSeekableFile(gpa, f, &node.store);
-            try zipfs.repo.exportStore(&node.store, repo_root);
             try stderr.writeAll("imported CAR into repo\n");
             return;
         }
@@ -297,9 +296,8 @@ pub fn main() !void {
             defer pins.deinit(gpa);
             var node: zipfs.Node = .{};
             defer node.deinit(gpa);
-            try zipfs.repo.importStore(&node.store, gpa, repo_root);
+            node.store.repo_root = repo_root;
             const n = try zipfs.pin.gc(gpa, &node.store, &pins, repo_root);
-            try zipfs.repo.exportStore(&node.store, repo_root);
             try stderr.print("removed {d} blocks\n", .{n});
             return;
         }
@@ -323,8 +321,8 @@ pub fn main() !void {
 
         var node: zipfs.Node = .{};
         defer node.deinit(gpa);
-        try zipfs.repo.importStore(&node.store, gpa, repo_root);
         node.store.repo_root = repo_root;
+        try node.store.initCache(gpa, cfg.block_cache_size orelse 1024);
 
         if (std.mem.eql(u8, cmd, "daemon")) {
             const sec = try zipfs.net_identity.loadOrCreateSecret64(gpa, repo_root);
@@ -371,6 +369,7 @@ pub fn main() !void {
             var repl_q: zipfs.repl_queue.ReplQueue = undefined;
             var rate_lim: zipfs.repl_queue.RateLimiter = undefined;
             var peer_conc: zipfs.repl_queue.PeerConcurrency = undefined;
+            var push_pool: zipfs.net_conn_pool.ConnPool = undefined;
             var sched_ctx: zipfs.repl_scheduler.SchedulerCtx = undefined;
             var state_mu = std.Thread.Mutex{}; // Guards ClusterState load/save across threads
 
@@ -383,6 +382,7 @@ pub fn main() !void {
                 repl_q = zipfs.repl_queue.ReplQueue.init(gpa, cfg.repl_queue_max_size orelse 4096);
                 rate_lim = zipfs.repl_queue.RateLimiter.init(cfg.repl_rate_limit orelse 20);
                 peer_conc = zipfs.repl_queue.PeerConcurrency.init(gpa, cfg.repl_max_per_peer orelse 2);
+                push_pool = zipfs.net_conn_pool.ConnPool.init(gpa);
 
                 heal_ctx = .{
                     .store = &node.store,
@@ -416,6 +416,7 @@ pub fn main() !void {
                     .batch_size = cfg.repl_batch_size orelse 50,
                     .cluster_peers = cfg.cluster_peers,
                     .state_mu = &state_mu,
+                    .pool = &push_pool,
                 };
                 _ = try std.Thread.spawn(.{}, zipfs.repl_scheduler.inboxPollLoop, .{&sched_ctx});
                 _ = try std.Thread.spawn(.{}, zipfs.repl_scheduler.schedulerLoop, .{&sched_ctx});
@@ -460,6 +461,7 @@ pub fn main() !void {
                 .announce_addrs = cfg.announce_addrs,
                 .cluster_peers = cfg.cluster_peers,
                 .replication_factor = cfg.replication_factor orelse 2,
+                .max_conns = cfg.max_gateway_conns orelse 64,
             };
             try zipfs.gateway.run(gpa, &gw_ctx);
         } else {
@@ -483,6 +485,7 @@ pub fn main() !void {
                 .announce_addrs = cfg.announce_addrs,
                 .cluster_peers = cfg.cluster_peers,
                 .replication_factor = cfg.replication_factor orelse 2,
+                .max_conns = cfg.max_gateway_conns orelse 64,
             };
             try zipfs.gateway.run(gpa, &gw_ctx);
         }
@@ -543,8 +546,8 @@ pub fn main() !void {
             };
             var node: zipfs.Node = .{};
             defer node.deinit(gpa);
-            try zipfs.repo.importStore(&node.store, gpa, repo_root);
-            if (node.store.get(cid_str) != null) {
+            node.store.repo_root = repo_root;
+            if (node.store.has(cid_str)) {
                 try stderr.writeAll("already in local blockstore\n");
                 return;
             }
@@ -553,7 +556,6 @@ pub fn main() !void {
             const peers = if (cfg.bootstrap_peers.len > 0) cfg.bootstrap_peers else default_bs[0..];
             const got = try zipfs.net_libp2p_fetch.fetchBlockIntoStore(gpa, &node.store, cid_str, peers, sec);
             if (got) {
-                try zipfs.repo.exportStore(&node.store, repo_root);
                 try stderr.writeAll("fetched block into repo\n");
             } else {
                 try stderr.writeAll("block already present\n");
@@ -700,7 +702,7 @@ pub fn main() !void {
             }
             var node: zipfs.Node = .{};
             defer node.deinit(gpa);
-            try zipfs.repo.importStore(&node.store, gpa, repo_root);
+            node.store.repo_root = repo_root;
 
             const sec = try zipfs.net_identity.loadOrCreateSecret64(gpa, repo_root);
             var cstate = try zipfs.cluster.ClusterState.load(gpa, repo_root);
@@ -733,7 +735,7 @@ pub fn main() !void {
             }
             var node: zipfs.Node = .{};
             defer node.deinit(gpa);
-            try zipfs.repo.importStore(&node.store, gpa, repo_root);
+            node.store.repo_root = repo_root;
 
             const sec = try zipfs.net_identity.loadOrCreateSecret64(gpa, repo_root);
             var cstate = try zipfs.cluster.ClusterState.load(gpa, repo_root);
@@ -751,7 +753,7 @@ pub fn main() !void {
         if (std.mem.eql(u8, sub, "sync")) {
             var node: zipfs.Node = .{};
             defer node.deinit(gpa);
-            try zipfs.repo.importStore(&node.store, gpa, repo_root);
+            node.store.repo_root = repo_root;
 
             const sec = try zipfs.net_identity.loadOrCreateSecret64(gpa, repo_root);
             const c_mode = if (cfg.cluster_mode) |m| zipfs.cluster.ClusterMode.fromString(m) orelse .replicate else .replicate;
@@ -810,9 +812,9 @@ pub fn main() !void {
             defer gpa.free(data);
             var node: zipfs.Node = .{};
             defer node.deinit(gpa);
+            node.store.repo_root = repo_root;
             const id = try node.blockPut(gpa, data);
             defer id.deinit(gpa);
-            try zipfs.repo.exportStore(&node.store, repo_root);
             const s = try id.toString(gpa);
             defer gpa.free(s);
             try std.fs.File.stdout().writeAll(s);
@@ -826,7 +828,7 @@ pub fn main() !void {
             };
             var node: zipfs.Node = .{};
             defer node.deinit(gpa);
-            try zipfs.repo.importStore(&node.store, gpa, repo_root);
+            node.store.repo_root = repo_root;
             const raw = try node.blockGet(gpa, cid_str);
             defer gpa.free(raw);
             try std.fs.File.stdout().writeAll(raw);

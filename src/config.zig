@@ -42,6 +42,10 @@ pub const Config = struct {
     repl_rate_limit: ?u32 = null,
     /// Max blocks per push batch (default 50).
     repl_batch_size: ?u16 = null,
+    /// Number of blocks to keep in the in-memory LRU cache (default 1024).
+    block_cache_size: ?u32 = null,
+    /// Max concurrent gateway connections (default 64).
+    max_gateway_conns: ?u32 = null,
 
     pub fn deinit(self: *Config, allocator: std.mem.Allocator) void {
         if (self.listen_addrs.len != 0) {
@@ -101,6 +105,8 @@ pub const Config = struct {
             repl_max_per_peer: ?u8 = null,
             repl_rate_limit: ?u32 = null,
             repl_batch_size: ?u16 = null,
+            block_cache_size: ?u32 = null,
+            max_gateway_conns: ?u32 = null,
         };
         var p = try std.json.parseFromSlice(Json, allocator, data, .{ .allocate = .alloc_always });
         defer p.deinit();
@@ -192,6 +198,12 @@ pub const Config = struct {
         if (p.value.repl_batch_size) |v| {
             if (v > 0) cfg.repl_batch_size = v;
         }
+        if (p.value.block_cache_size) |v| {
+            if (v > 0) cfg.block_cache_size = v;
+        }
+        if (p.value.max_gateway_conns) |v| {
+            if (v > 0) cfg.max_gateway_conns = v;
+        }
         return cfg;
     }
 
@@ -214,6 +226,8 @@ pub const Config = struct {
             repl_max_per_peer: ?u8,
             repl_rate_limit: ?u32,
             repl_batch_size: ?u16,
+            block_cache_size: ?u32,
+            max_gateway_conns: ?u32,
         };
         var buf = std.ArrayList(u8).empty;
         defer buf.deinit(allocator);
@@ -236,6 +250,8 @@ pub const Config = struct {
             .repl_max_per_peer = self.repl_max_per_peer,
             .repl_rate_limit = self.repl_rate_limit,
             .repl_batch_size = self.repl_batch_size,
+            .block_cache_size = self.block_cache_size,
+            .max_gateway_conns = self.max_gateway_conns,
         }, .{ .whitespace = .indent_2 })});
         try buf.append(allocator, '\n');
         const path = try std.fs.path.join(allocator, &.{ repo_root, "config.json" });
