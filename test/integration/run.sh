@@ -6,6 +6,20 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.yml"
 export COMPOSE_FILE
 
+if ! command -v curl >/dev/null 2>&1; then
+  echo "ERROR: required command 'curl' not found in PATH" >&2
+  exit 1
+fi
+
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "ERROR: required command 'python3' not found in PATH" >&2
+  exit 1
+fi
+
+if ! docker compose version >/dev/null 2>&1; then
+  echo "ERROR: required command 'docker compose' is not available" >&2
+  exit 1
+fi
 cleanup() {
   docker compose -f "${COMPOSE_FILE}" down -v --remove-orphans >/dev/null 2>&1 || true
 }
