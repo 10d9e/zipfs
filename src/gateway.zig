@@ -387,10 +387,11 @@ fn handleAdd(allocator: std.mem.Allocator, ctx: *const GatewayCtx, stream: std.n
         if (ctx.dht_provide_on_pin) {
             if (std.heap.page_allocator.dupe(u8, ctx.repo_root)) |rr| {
                 if (std.heap.page_allocator.dupe(u8, cid_str)) |c_owned| {
-                    _ = std.Thread.spawn(.{}, dhtProvideAfterPinWorker, .{ rr, c_owned }) catch {
+                    const t = std.Thread.spawn(.{}, dhtProvideAfterPinWorker, .{ rr, c_owned }) catch {
                         std.heap.page_allocator.free(rr);
                         std.heap.page_allocator.free(c_owned);
                     };
+                    t.detach();
                 } else |_| {
                     std.heap.page_allocator.free(rr);
                 }
