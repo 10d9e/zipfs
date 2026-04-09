@@ -1,0 +1,79 @@
+name: zipfs-integration
+# Each node has its own volume. After `zipfs add` on zipfs1, replication is enqueued via repl_inbox
+# (daemon polls it) so other nodes receive the full DAG; without that, peers only see data from
+# `net fetch` / `cluster replicate` / HTTP add with pin. Use `du -sh $IPFS_PATH/blocks` for disk use
+# (`ls blocks` only shows shard dirs, not total bytes).
+
+services:
+  zipfs1:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    ports:
+      - "8081:8080"
+    environment: &zipfs_env
+      CLUSTER_SECRET: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      CLUSTER_MODE: replicate
+      REPLICATION_FACTOR: "5"
+      GATEWAY_PORT: "8080"
+      SWARM_PORT: "4001"
+      SELF_HEAL_INTERVAL: "60"
+      REPROVIDE_INTERVAL_SECS: "5"
+      CLUSTER_PEERS: '"/dns4/zipfs2/tcp/4001","/dns4/zipfs3/tcp/4001","/dns4/zipfs4/tcp/4001","/dns4/zipfs5/tcp/4001"'
+    volumes:
+      - zipfs1_data:/data/zipfs
+
+  zipfs2:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    ports:
+      - "8082:8080"
+    environment:
+      <<: *zipfs_env
+      CLUSTER_PEERS: '"/dns4/zipfs1/tcp/4001","/dns4/zipfs3/tcp/4001","/dns4/zipfs4/tcp/4001","/dns4/zipfs5/tcp/4001"'
+    volumes:
+      - zipfs2_data:/data/zipfs
+
+  zipfs3:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    ports:
+      - "8083:8080"
+    environment:
+      <<: *zipfs_env
+      CLUSTER_PEERS: '"/dns4/zipfs1/tcp/4001","/dns4/zipfs2/tcp/4001","/dns4/zipfs4/tcp/4001","/dns4/zipfs5/tcp/4001"'
+    volumes:
+      - zipfs3_data:/data/zipfs
+
+  zipfs4:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    ports:
+      - "8084:8080"
+    environment:
+      <<: *zipfs_env
+      CLUSTER_PEERS: '"/dns4/zipfs1/tcp/4001","/dns4/zipfs2/tcp/4001","/dns4/zipfs3/tcp/4001","/dns4/zipfs5/tcp/4001"'
+    volumes:
+      - zipfs4_data:/data/zipfs
+
+  zipfs5:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    ports:
+      - "8085:8080"
+    environment:
+      <<: *zipfs_env
+      CLUSTER_PEERS: '"/dns4/zipfs1/tcp/4001","/dns4/zipfs2/tcp/4001","/dns4/zipfs3/tcp/4001","/dns4/zipfs4/tcp/4001"'
+    volumes:
+      - zipfs5_data:/data/zipfs
+
+volumes:
+  zipfs1_data:
+  zipfs2_data:
+  zipfs3_data:
+  zipfs4_data:
+  zipfs5_data:

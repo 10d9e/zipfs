@@ -112,7 +112,7 @@ Run with no arguments to print a short help summary.
 |---------|-------------|
 | `add [-r] <path>` | Add a file or directory (UnixFS); exports blocks to `$IPFS_PATH` |
 | `cat <cid> [subpath]` | Cat file or path inside a directory CID |
-| `cat --net <cid>` | If the block is missing locally, **DHT + bitswap** fetch, then cat |
+| `cat --net <cid>` | **Recursive DAG** fetch (bitswap + DHT + `cluster_peers`), then cat (chunked UnixFS files) |
 | `ls <cid> [path]` | List directory |
 | `block put <path>` / `block get <cid>` | Raw block I/O |
 | `dag car import <path>` / `dag car export <path>` | CAR import/export |
@@ -137,7 +137,8 @@ Run with no arguments to print a short help summary.
 | Command | Description |
 |---------|-------------|
 | `id` | Print a **new** ephemeral Ed25519 PeerID (does not use repo identity) |
-| `net fetch <cid>` | Iterative **GET_PROVIDERS** walk + bitswap into local repo |
+| `net fetch <cid>` | **Recursive** bitswap + DHT for the full UnixFS DAG under `cid` (default cap 100k blocks) |
+| `net fetch --single-block <cid>` | Fetch **one** block only (legacy behavior) |
 | `net provide <cid>` | **ADD_PROVIDER** for the CID to closest DHT peers |
 | `net dial-noise <host> <port>` | Noise handshake; print remote PeerID |
 | `net dial-bitswap <host> <port> <cid>` | Bitswap want-have / want-block against a single peer |

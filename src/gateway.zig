@@ -8,6 +8,10 @@ const pin = @import("pin.zig");
 const repl_queue = @import("repl_queue.zig");
 const cluster_mod = @import("cluster.zig");
 const replication = @import("replication.zig");
+const config = @import("config.zig");
+const net_identity = @import("net/identity.zig");
+const net_swarm_config = @import("net/swarm_config.zig");
+const net_libp2p_provide = @import("net/libp2p_provide.zig");
 
 /// Context for the gateway server, carrying mutable state needed for writes.
 pub const GatewayCtx = struct {
@@ -40,7 +44,29 @@ pub const GatewayCtx = struct {
     cluster_secret: ?[]const u8 = null,
     /// Mutex guarding ClusterState load/save.
     state_mu: ?*std.Thread.Mutex = null,
+    /// Daemon only: after HTTP pin, publish ADD_PROVIDER in a background thread so `cat --net` / DHT can find this node.
+    dht_provide_on_pin: bool = false,
 };
+
+fn dhtProvideAfterPinWorker(repo_root: []u8, cid_owned: []u8) void {
+    defer {
+        std.heap.page_allocator.free(repo_root);
+        std.heap.page_allocator.free(cid_owned);
+    }
+    const a = std.heap.page_allocator;
+    var cfg = config.Config.load(a, repo_root) catch return;
+    defer cfg.deinit(a);
+    const sec = net_identity.loadOrCreateSecret64(a, repo_root) catch return;
+    const default_bs = config.default_bootstrap_peers;
+    const peer_list: []const []const u8 = if (cfg.bootstrap_peers.len > 0) cfg.bootstrap_peers else default_bs[0..];
+    const swarm_port = net_swarm_config.swarmTcpPortFromConfig(a, &cfg);
+    const bins = net_swarm_config.buildIdentifyListenBinaries(a, &cfg, swarm_port) catch return;
+    defer {
+        for (bins) |b| a.free(b);
+        a.free(bins);
+    }
+    net_libp2p_provide.provideCid(a, cid_owned, peer_list, sec, .{}, 8, bins) catch {};
+}
 
 fn sendResp(stream: std.net.Stream, status: []const u8, content_type: []const u8, body: []const u8) void {
     var hdr: [512]u8 = undefined;
@@ -357,6 +383,20 @@ fn handleAdd(allocator: std.mem.Allocator, ctx: *const GatewayCtx, stream: std.n
         pins.save(allocator, ctx.repo_root) catch |err| {
             std.log.err("pin save failed: {}", .{err});
         };
+
+        if (ctx.dht_provide_on_pin) {
+            if (std.heap.page_allocator.dupe(u8, ctx.repo_root)) |rr| {
+                if (std.heap.page_allocator.dupe(u8, cid_str)) |c_owned| {
+                    const t = std.Thread.spawn(.{}, dhtProvideAfterPinWorker, .{ rr, c_owned }) catch {
+                        std.heap.page_allocator.free(rr);
+                        std.heap.page_allocator.free(c_owned);
+                    };
+                    t.detach();
+                } else |_| {
+                    std.heap.page_allocator.free(rr);
+                }
+            } else |_| {}
+        }
 
         if (ctx.sync_repl) {
             // Change C: synchronous replication — block until peers confirm

@@ -72,9 +72,10 @@ pub fn main() !void {
             \\        gateway | daemon   (HTTP + libp2p swarm on listen_addrs from config)
             \\Net:    net echo-serve <port>  net echo-dial <host> <port>
             \\        net dial-noise <host> <port>   net dial-bitswap <host> <port> <cid>
-            \\        net fetch <cid>  (iterative DHT + bitswap)  net provide <cid>  (ADD_PROVIDER to closest peers)
+            \\        net fetch [--single-block] <cid>  (recursive DAG + bitswap; --single-block = one CID only)
+            \\        net provide <cid>  (ADD_PROVIDER to closest peers)
             \\        id  (peer id from new Ed25519 key)
-            \\        cat --net <cid>   (fetch over IPFS if missing locally, then cat)
+            \\        cat --net <cid>   (recursive DAG fetch over IPFS, then cat)
             \\Cluster: cluster peers add <multiaddr>  cluster peers rm <multiaddr>  cluster peers ls
             \\         cluster status  cluster replicate <cid> [--factor N]
             \\         cluster shard <cid> [--shards M]  cluster sync
@@ -139,6 +140,13 @@ pub fn main() !void {
         defer gpa.free(s);
         try std.fs.File.stdout().writeAll(s);
         try std.fs.File.stdout().writeAll("\n");
+        // Match HTTP /api/v0/add: when cluster is configured, enqueue replication so peers get the
+        // full DAG (CLI add alone only wrote local blocks; daemon polls repl_inbox).
+        if (cfg.cluster_mode != null and cfg.cluster_peers.len > 0) {
+            zipfs.pin.notifyInboxWithFactor(gpa, repo_root, s, 0) catch |err| {
+                try stderr.print("warn: cluster repl_inbox notify failed: {}\n", .{err});
+            };
+        }
         return;
     }
 
@@ -156,11 +164,11 @@ pub fn main() !void {
         var node: zipfs.Node = .{};
         defer node.deinit(gpa);
         node.store.repo_root = repo_root;
-        if (use_net and !node.store.has(cid_str)) {
+        if (use_net) {
             const sec = try zipfs.net_identity.loadOrCreateSecret64(gpa, repo_root);
             const default_bs = zipfs.config.default_bootstrap_peers;
             const peers = if (cfg.bootstrap_peers.len > 0) cfg.bootstrap_peers else default_bs[0..];
-            _ = zipfs.net_libp2p_fetch.fetchBlockIntoStore(gpa, &node.store, cid_str, peers, sec) catch |err| {
+            _ = zipfs.net_libp2p_fetch.fetchUnixfsDagIntoStore(gpa, &node.store, cid_str, peers, sec, cfg.cluster_peers, .{}) catch |err| {
                 try stderr.print("cat --net: fetch failed: {}\n", .{err});
                 return err;
             };
@@ -501,6 +509,7 @@ pub fn main() !void {
                 .ed25519_secret64 = if (cluster_enabled) sec else null,
                 .cluster_secret = cfg.cluster_secret,
                 .state_mu = if (cluster_enabled) &state_mu else null,
+                .dht_provide_on_pin = true,
             };
             try zipfs.gateway.run(gpa, &gw_ctx);
         } else {
@@ -533,7 +542,7 @@ pub fn main() !void {
 
     if (std.mem.eql(u8, cmd, "net")) {
         const sub = args.next() orelse {
-            try stderr.writeAll("net: echo-serve <port> | echo-dial <host> <port> | dial-noise <host> <port> | dial-bitswap <host> <port> <cid> | fetch <cid> | provide <cid>\n");
+            try stderr.writeAll("net: echo-serve <port> | echo-dial <host> <port> | dial-noise <host> <port> | dial-bitswap <host> <port> <cid> | fetch [--single-block] <cid> | provide <cid>\n");
             return error.BadArgs;
         };
         if (std.mem.eql(u8, sub, "echo-serve")) {
@@ -579,25 +588,44 @@ pub fn main() !void {
             return;
         }
         if (std.mem.eql(u8, sub, "fetch")) {
-            const cid_str = args.next() orelse {
+            var single_block = false;
+            var cid_str: ?[]const u8 = null;
+            while (args.next()) |a| {
+                if (std.mem.eql(u8, a, "--single-block")) {
+                    single_block = true;
+                } else {
+                    cid_str = a;
+                    break;
+                }
+            }
+            const cid = cid_str orelse {
                 try stderr.writeAll("net fetch: missing cid\n");
                 return error.BadArgs;
             };
             var node: zipfs.Node = .{};
             defer node.deinit(gpa);
             node.store.repo_root = repo_root;
-            if (node.store.has(cid_str)) {
-                try stderr.writeAll("already in local blockstore\n");
-                return;
-            }
             const sec = try zipfs.net_identity.loadOrCreateSecret64(gpa, repo_root);
             const default_bs = zipfs.config.default_bootstrap_peers;
             const peers = if (cfg.bootstrap_peers.len > 0) cfg.bootstrap_peers else default_bs[0..];
-            const got = try zipfs.net_libp2p_fetch.fetchBlockIntoStore(gpa, &node.store, cid_str, peers, sec);
-            if (got) {
-                try stderr.writeAll("fetched block into repo\n");
+            if (single_block) {
+                if (node.store.has(cid)) {
+                    try stderr.writeAll("already in local blockstore\n");
+                    return;
+                }
+                const got = try zipfs.net_libp2p_fetch.fetchBlockIntoStore(gpa, &node.store, cid, peers, sec, cfg.cluster_peers);
+                if (got) {
+                    try stderr.writeAll("fetched block into repo\n");
+                } else {
+                    try stderr.writeAll("block already present\n");
+                }
             } else {
-                try stderr.writeAll("block already present\n");
+                const n = try zipfs.net_libp2p_fetch.fetchUnixfsDagIntoStore(gpa, &node.store, cid, peers, sec, cfg.cluster_peers, .{});
+                if (n == 0) {
+                    try stderr.writeAll("DAG already complete locally (no new blocks fetched)\n");
+                } else {
+                    try stderr.print("fetched {d} block(s) into repo\n", .{n});
+                }
             }
             return;
         }

@@ -80,12 +80,19 @@ fn parseLink(msg: []const u8) error{Truncated}!ParsedLink {
 const ParsedUnixFs = struct {
     typ: u64,
     data: []const u8,
+    /// Present when field 3 (`filesize`) was decoded from the UnixFS `Data` message.
+    filesize: ?u64 = null,
+    /// Sum of UnixFS field 4 (`blocksizes`) entries when at least one was decoded (Kubo often
+    /// encodes chunk sizes here; may be present without field 3).
+    blocksizes_sum: ?u64 = null,
 };
 
 fn parseUnixFs(msg: []const u8) error{Truncated}!ParsedUnixFs {
     var i: usize = 0;
     var typ: u64 = 0;
     var data: []const u8 = &.{};
+    var filesize: ?u64 = null;
+    var blocksizes_sum: ?u64 = null;
     while (i < msg.len) {
         const tag = try readVarint(msg, &i);
         const field = tag >> 3;
@@ -98,6 +105,28 @@ fn parseUnixFs(msg: []const u8) error{Truncated}!ParsedUnixFs {
             2 => {
                 if (wire != 2) return error.Truncated;
                 data = try readBytes(msg, &i);
+            },
+            3 => {
+                if (wire != 0) return error.Truncated;
+                filesize = try readVarint(msg, &i);
+            },
+            4 => {
+                // repeated uint64 blocksizes — either unpacked (wire 0) or packed (wire 2).
+                switch (wire) {
+                    0 => {
+                        const v = try readVarint(msg, &i);
+                        blocksizes_sum = (blocksizes_sum orelse 0) + v;
+                    },
+                    2 => {
+                        const inner = try readBytes(msg, &i);
+                        var j: usize = 0;
+                        while (j < inner.len) {
+                            const v = try readVarint(inner, &j);
+                            blocksizes_sum = (blocksizes_sum orelse 0) + v;
+                        }
+                    },
+                    else => return error.Truncated,
+                }
             },
             else => {
                 switch (wire) {
@@ -113,7 +142,53 @@ fn parseUnixFs(msg: []const u8) error{Truncated}!ParsedUnixFs {
             },
         }
     }
-    return .{ .typ = typ, .data = data };
+    return .{ .typ = typ, .data = data, .filesize = filesize, .blocksizes_sum = blocksizes_sum };
+}
+
+/// Metadata from the embedded UnixFS `Data` inside a `dag-pb` block (for file roots).
+pub const DagPbUnixFsFileMeta = struct {
+    is_unixfs_file: bool,
+    /// UnixFS field 3; omitted in protobuf => null.
+    filesize: ?u64,
+    /// Sum of field 4 `blocksizes` when any were present; else null.
+    blocksizes_sum: ?u64,
+};
+
+/// Prefer `filesize`; else total from `blocksizes` (Kubo uses both for chunked files).
+pub fn unixFsDeclaredPayloadLen(meta: DagPbUnixFsFileMeta) ?u64 {
+    if (meta.filesize) |f| return f;
+    if (meta.blocksizes_sum) |s| return s;
+    return null;
+}
+
+pub fn dagPbUnixFsFileMeta(allocator: std.mem.Allocator, block: []const u8) error{ Truncated, OutOfMemory, BadBlock }!DagPbUnixFsFileMeta {
+    const parsed = parseDagPbNode(allocator, block) catch return error.BadBlock;
+    defer allocator.free(parsed.links);
+    const um = parsed.ufs_msg orelse return .{ .is_unixfs_file = false, .filesize = null, .blocksizes_sum = null };
+    const ufs = parseUnixFs(um) catch return error.BadBlock;
+    if (ufs.typ != unixfs_file) return .{ .is_unixfs_file = false, .filesize = null, .blocksizes_sum = null };
+    return .{ .is_unixfs_file = true, .filesize = ufs.filesize, .blocksizes_sum = ufs.blocksizes_sum };
+}
+
+/// True when this `dag-pb` block looks like a **truncated** chunked UnixFS file root: UnixFS says
+/// non-zero total size (`filesize` or `blocksizes`), no inline `Data`, but protobuf carries **no**
+/// `Links`. A short write or partial copy can produce that shape while `store.has(cid)` is still
+/// true, which would otherwise make a DAG walk stop immediately with "nothing to fetch".
+pub fn dagPbChunkedUnixFsRootMissingLinks(allocator: std.mem.Allocator, block: []const u8) error{ Truncated, OutOfMemory, BadBlock }!bool {
+    const parsed = parseDagPbNode(allocator, block) catch return error.BadBlock;
+    defer allocator.free(parsed.links);
+    if (parsed.links.len > 0) return false;
+    const um = parsed.ufs_msg orelse return false;
+    const ufs = parseUnixFs(um) catch return error.BadBlock;
+    if (ufs.typ != unixfs_file) return false;
+    if (ufs.data.len > 0) return false;
+    const declared = unixFsDeclaredPayloadLen(.{
+        .is_unixfs_file = true,
+        .filesize = ufs.filesize,
+        .blocksizes_sum = ufs.blocksizes_sum,
+    }) orelse return false;
+    if (declared == 0) return false;
+    return true;
 }
 
 /// UnixFS file type enum value (proto).
@@ -306,6 +381,46 @@ fn catInto(allocator: std.mem.Allocator, store: *Blockstore, key_utf8: []const u
         defer allocator.free(ck);
         try catInto(allocator, store, ck, out);
     }
+}
+
+fn unixFsFilePayloadByteCountInto(allocator: std.mem.Allocator, store: *Blockstore, key_utf8: []const u8) error{ OutOfMemory, NotFound, BadBlock }!u64 {
+    const block = store.get(allocator, key_utf8) orelse return error.NotFound;
+    defer allocator.free(block);
+
+    var root = Cid.parse(allocator, key_utf8) catch return error.BadBlock;
+    defer root.deinit(allocator);
+
+    if (root.codec == codec_raw) {
+        return @intCast(block.len);
+    }
+    if (root.codec != codec_dag_pb) return error.BadBlock;
+
+    const parsed = parseDagPbNode(allocator, block) catch return error.BadBlock;
+    defer allocator.free(parsed.links);
+
+    const um = parsed.ufs_msg orelse return error.BadBlock;
+    const ufs = parseUnixFs(um) catch return error.BadBlock;
+
+    if (ufs.typ != unixfs_file) return error.BadBlock;
+
+    if (ufs.data.len > 0) {
+        return @intCast(ufs.data.len);
+    }
+
+    var sum: u64 = 0;
+    for (parsed.links) |lnk| {
+        const child = Cid.fromBytes(allocator, lnk.hash) catch return error.BadBlock;
+        defer child.deinit(allocator);
+        const ck = child.toString(allocator) catch return error.BadBlock;
+        defer allocator.free(ck);
+        sum += try unixFsFilePayloadByteCountInto(allocator, store, ck);
+    }
+    return sum;
+}
+
+/// Same traversal as `catFile`, but returns total payload length without buffering file bytes.
+pub fn unixFsFilePayloadByteCount(allocator: std.mem.Allocator, store: *Blockstore, root_key_utf8: []const u8) error{ OutOfMemory, NotFound, BadBlock }!u64 {
+    return unixFsFilePayloadByteCountInto(allocator, store, root_key_utf8);
 }
 
 /// Owned list of child CID strings referenced by a dag-pb block (empty for raw / non-dag).
