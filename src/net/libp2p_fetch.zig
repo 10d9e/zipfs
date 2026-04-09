@@ -12,17 +12,31 @@ const bootstrap_resolve = @import("bootstrap_resolve.zig");
 pub const FetchError = error{NoBlockFromNetwork};
 
 /// Try DHT walk + bitswap until the block is in `store`. Returns true if a block was fetched.
+/// `direct_bitswap_peers`: multiaddr strings (`/ip4/.../tcp/...` or `/dns4/.../tcp/...`) to try with bitswap
+/// before the DHT (needed on private networks where public DHT does not return RFC1918 provider addrs).
 pub fn fetchBlockIntoStore(
     allocator: std.mem.Allocator,
     store: *blockstore.Blockstore,
     cid_str: []const u8,
     bootstrap_peers: []const []const u8,
     ed25519_secret64: [64]u8,
+    direct_bitswap_peers: []const []const u8,
 ) !bool {
     if (store.has(cid_str)) return false;
 
     var c = try cid_mod.Cid.parse(allocator, cid_str);
     defer c.deinit(allocator);
+
+    for (direct_bitswap_peers) |addr_str| {
+        const t = multiaddr.parseStringTcp(allocator, addr_str) catch continue;
+        defer t.deinit(allocator);
+        const blk = libp2p_dial.dialBitswapWant(allocator, t.host, t.port, cid_str, ed25519_secret64) catch continue;
+        defer if (blk) |b| allocator.free(b);
+        if (blk) |b| {
+            try store.put(allocator, c, b);
+            return true;
+        }
+    }
 
     const routing_key = try dht.providerKeyForMultihash(allocator, c.hash);
     defer allocator.free(routing_key);

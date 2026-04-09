@@ -160,7 +160,7 @@ pub fn main() !void {
             const sec = try zipfs.net_identity.loadOrCreateSecret64(gpa, repo_root);
             const default_bs = zipfs.config.default_bootstrap_peers;
             const peers = if (cfg.bootstrap_peers.len > 0) cfg.bootstrap_peers else default_bs[0..];
-            _ = zipfs.net_libp2p_fetch.fetchBlockIntoStore(gpa, &node.store, cid_str, peers, sec) catch |err| {
+            _ = zipfs.net_libp2p_fetch.fetchBlockIntoStore(gpa, &node.store, cid_str, peers, sec, cfg.cluster_peers) catch |err| {
                 try stderr.print("cat --net: fetch failed: {}\n", .{err});
                 return err;
             };
@@ -501,6 +501,7 @@ pub fn main() !void {
                 .ed25519_secret64 = if (cluster_enabled) sec else null,
                 .cluster_secret = cfg.cluster_secret,
                 .state_mu = if (cluster_enabled) &state_mu else null,
+                .dht_provide_on_pin = true,
             };
             try zipfs.gateway.run(gpa, &gw_ctx);
         } else {
@@ -593,7 +594,7 @@ pub fn main() !void {
             const sec = try zipfs.net_identity.loadOrCreateSecret64(gpa, repo_root);
             const default_bs = zipfs.config.default_bootstrap_peers;
             const peers = if (cfg.bootstrap_peers.len > 0) cfg.bootstrap_peers else default_bs[0..];
-            const got = try zipfs.net_libp2p_fetch.fetchBlockIntoStore(gpa, &node.store, cid_str, peers, sec);
+            const got = try zipfs.net_libp2p_fetch.fetchBlockIntoStore(gpa, &node.store, cid_str, peers, sec, cfg.cluster_peers);
             if (got) {
                 try stderr.writeAll("fetched block into repo\n");
             } else {
