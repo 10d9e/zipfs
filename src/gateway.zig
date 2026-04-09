@@ -70,7 +70,8 @@ fn dhtProvideAfterPinWorker(repo_root: []u8, cid_owned: []u8) void {
 
 fn sendResp(stream: std.net.Stream, status: []const u8, content_type: []const u8, body: []const u8) void {
     var hdr: [512]u8 = undefined;
-    const h = std.fmt.bufPrint(&hdr,
+    const h = std.fmt.bufPrint(
+        &hdr,
         "{s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n",
         .{ status, content_type, body.len },
     ) catch return;
@@ -80,7 +81,8 @@ fn sendResp(stream: std.net.Stream, status: []const u8, content_type: []const u8
 
 fn sendRespWithHeaders(stream: std.net.Stream, status: []const u8, extra_headers: []const u8, body: []const u8) void {
     var hdr: [1024]u8 = undefined;
-    const h = std.fmt.bufPrint(&hdr,
+    const h = std.fmt.bufPrint(
+        &hdr,
         "{s}\r\n{s}Content-Length: {d}\r\nConnection: close\r\n\r\n",
         .{ status, extra_headers, body.len },
     ) catch return;
