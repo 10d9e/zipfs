@@ -275,6 +275,12 @@ fn pushEntriesBatched(
             batch_start = i;
             batch_size = 0;
         }
+
+        // Guard: reject individual entries that exceed the yamux frame cap (4MB).
+        // This should never happen with normal IPFS chunking (256KB default) but
+        // prevents silent failures if a block is unexpectedly large.
+        if (entry_size > 4 * 1024 * 1024) return error.MessageTooLong;
+
         batch_size += entry_size;
     }
 
@@ -301,13 +307,13 @@ pub fn replicateCid(
     ed25519_secret64: [64]u8,
 ) !void {
     // Collect all blocks in DAG
-    std.debug.print("[repl] collectDagBlocks for {s}\n", .{cid_str});
+    std.log.info("[repl] collectDagBlocks for {s}\n", .{cid_str});
     const all_blocks = try collectDagBlocks(allocator, store, cid_str);
     defer {
         for (all_blocks) |b| allocator.free(b);
         allocator.free(all_blocks);
     }
-    std.debug.print("[repl] collected {d} blocks\n", .{all_blocks.len});
+    std.log.info("[repl] collected {d} blocks\n", .{all_blocks.len});
 
     // Ensure replica record exists
     _ = try state.upsertReplica(cid_str, .replicate, target_n);
@@ -315,7 +321,7 @@ pub fn replicateCid(
     // Get alive peers
     const alive = try state.alivePeers(allocator);
     defer allocator.free(alive);
-    std.debug.print("[repl] alive peers: {d}\n", .{alive.len});
+    std.log.info("[repl] alive peers: {d}\n", .{alive.len});
 
     // Get current confirmed peers for this CID
     const rec = state.replicas.getPtr(cid_str) orelse return;
@@ -323,7 +329,7 @@ pub fn replicateCid(
 
     // Select new peers
     const needed: usize = if (target_n > already_confirmed.len) target_n - already_confirmed.len else 0;
-    std.debug.print("[repl] needed={d} already_confirmed={d}\n", .{ needed, already_confirmed.len });
+    std.log.info("[repl] needed={d} already_confirmed={d}\n", .{ needed, already_confirmed.len });
     if (needed == 0) return;
 
     const selected = try selectPeersConsistentHash(allocator, alive, cid_str, needed, already_confirmed);
@@ -334,17 +340,17 @@ pub fn replicateCid(
     defer freeBlockEntries(allocator, entries);
 
     // Push to each selected peer and track confirmations
-    std.debug.print("[repl] pushing {d} entries to {d} peers\n", .{ entries.len, selected.len });
+    std.log.info("[repl] pushing {d} entries to {d} peers\n", .{ entries.len, selected.len });
     var confirmed_count: usize = already_confirmed.len;
     for (selected) |peer| {
         const hp = cluster_push.parseHostPort(allocator, peer.addr) catch {
-            std.debug.print("[repl] parseHostPort failed for {s}\n", .{peer.addr});
+            std.log.info("[repl] parseHostPort failed for {s}\n", .{peer.addr});
             try state.addRetry(.push_blocks, cid_str, peer.addr, null);
             continue;
         };
         defer allocator.free(hp.host);
 
-        std.debug.print("[repl] pushing to {s}:{d}\n", .{ hp.host, hp.port });
+        std.log.info("[repl] pushing to {s}:{d}\n", .{ hp.host, hp.port });
         pushEntriesBatched(
             allocator,
             hp.host,
@@ -354,12 +360,12 @@ pub fn replicateCid(
             cluster_secret,
             ed25519_secret64,
         ) catch |err| {
-            std.debug.print("[repl] push FAILED to {s}:{d}: {}\n", .{ hp.host, hp.port, err });
+            std.log.info("[repl] push FAILED to {s}:{d}: {}\n", .{ hp.host, hp.port, err });
             try state.addRetry(.push_blocks, cid_str, peer.addr, null);
             continue;
         };
 
-        std.debug.print("[repl] push OK to {s}:{d}\n", .{ hp.host, hp.port });
+        std.log.info("[repl] push OK to {s}:{d}\n", .{ hp.host, hp.port });
         try state.addConfirmedPeer(cid_str, peer.addr);
         confirmed_count += 1;
     }
