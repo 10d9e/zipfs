@@ -1,4 +1,8 @@
 name: zipfs-integration
+# Each node has its own volume. After `zipfs add` on zipfs1, replication is enqueued via repl_inbox
+# (daemon polls it) so other nodes receive the full DAG; without that, peers only see data from
+# `net fetch` / `cluster replicate` / HTTP add with pin. Use `du -sh $IPFS_PATH/blocks` for disk use
+# (`ls blocks` only shows shard dirs, not total bytes).
 
 services:
   zipfs1:

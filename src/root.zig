@@ -271,3 +271,75 @@ test "add cat chunked file" {
     defer gpa.free(out);
     try std.testing.expectEqualSlices(u8, payload.items, out);
 }
+
+test "fetchUnixfsDagIntoStore all-local DAG realloc regression" {
+    // Many chunks => large BFS queue => ArrayList realloc. Done-map keys must not alias queue memory.
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const repo_path = try tmp.dir.realpathAlloc(gpa, ".");
+    defer gpa.free(repo_path);
+
+    var node: Node = .{};
+    defer node.deinit(gpa);
+    node.store.repo_root = repo_path;
+    try node.store.initCache(gpa, 256);
+
+    var cfg = try config.Config.initWithMainnetDefaults(gpa);
+    defer cfg.deinit(gpa);
+
+    var payload = std.ArrayList(u8).empty;
+    defer payload.deinit(gpa);
+    try payload.appendNTimes(gpa, 'y', importer.chunk_size * 40 + 777);
+
+    const root = try node.addFileWithConfig(gpa, payload.items, &cfg);
+    defer root.deinit(gpa);
+    const key = try root.toString(gpa);
+    defer gpa.free(key);
+
+    const n = try net_libp2p_fetch.fetchUnixfsDagIntoStore(
+        gpa,
+        &node.store,
+        key,
+        &[_][]const u8{},
+        [_]u8{0} ** 64,
+        &[_][]const u8{},
+        .{},
+    );
+    try std.testing.expectEqual(@as(usize, 0), n);
+    const byte_count = try resolver.unixFsFilePayloadByteCount(gpa, &node.store, key);
+    try std.testing.expectEqual(@as(u64, @intCast(payload.items.len)), byte_count);
+    const out = try node.catFile(gpa, key);
+    defer gpa.free(out);
+    try std.testing.expectEqualSlices(u8, payload.items, out);
+}
+
+test "unixFsDeclaredPayloadLen uses blocksizes when filesize omitted" {
+    const gpa = std.testing.allocator;
+    // dag-pb Data: unixfs file, two blocksizes 50+50 (field 4), no filesize field 3.
+    const stub_pb = [_]u8{ 0x0a, 0x06, 0x08, 0x02, 0x20, 0x32, 0x20, 0x32 };
+    const meta = try resolver.dagPbUnixFsFileMeta(gpa, &stub_pb);
+    try std.testing.expect(meta.is_unixfs_file);
+    try std.testing.expectEqual(@as(?u64, null), meta.filesize);
+    try std.testing.expectEqual(@as(?u64, @as(u64, 100)), meta.blocksizes_sum);
+    try std.testing.expectEqual(@as(u64, 100), resolver.unixFsDeclaredPayloadLen(meta).?);
+}
+
+test "dagPbChunkedUnixFsRootMissingLinks detects stub root" {
+    const gpa = std.testing.allocator;
+    // dag-pb: field 1 Data = unixfs { Type=file(2), filesize=100 }, no Links — looks like truncated root.
+    const dag_pb_truncated = [_]u8{ 0x0a, 0x04, 0x08, 0x02, 0x18, 0x64 };
+    try std.testing.expect(try resolver.dagPbChunkedUnixFsRootMissingLinks(gpa, &dag_pb_truncated));
+
+    // Same unixfs but with one link (minimal hash bytes) => not "missing links"
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(gpa);
+    try buf.appendSlice(gpa, &dag_pb_truncated);
+    // dag-pb field 2: PBLink { Hash = 0x0a 01 00 } (1 byte placeholder hash — parseLink needs hash)
+    try buf.appendSlice(gpa, &[_]u8{ 0x12, 0x03, 0x0a, 0x01, 0x00 });
+    try std.testing.expect(!try resolver.dagPbChunkedUnixFsRootMissingLinks(gpa, buf.items));
+
+    // Inline file data => false (unixfs: typ=file, Data="A", filesize=1 — 7 bytes under field 1)
+    const inline_file = [_]u8{ 0x0a, 0x07, 0x08, 0x02, 0x12, 0x01, 0x41, 0x18, 0x01 };
+    try std.testing.expect(!try resolver.dagPbChunkedUnixFsRootMissingLinks(gpa, &inline_file));
+}
