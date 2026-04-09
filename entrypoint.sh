@@ -28,6 +28,7 @@ if [ -n "$CLUSTER_PEERS" ]; then
   if [ -n "$_ann_ip" ]; then
     announce_line='"announce_addrs": ["/ip4/'"${_ann_ip}"'/tcp/'"${SWARM_PORT:-4001}"'"],'
   else
+    printf '%s\n' "WARNING: Failed to determine a non-loopback IPv4 address for swarm announce; writing empty announce_addrs. Identify may fall back to 127.0.0.1, which is not dialable from other containers/hosts. Set SWARM_ANNOUNCE_IP explicitly." >&2
     announce_line='"announce_addrs": [],'
   fi
   cat > "$IPFS_PATH/config.json" <<CONF
