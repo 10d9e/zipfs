@@ -103,7 +103,7 @@ fn advanceStream(
     st: *StreamState,
     ictx: IdentifyCtx,
     cluster_secret: ?[]const u8,
-    mu: *std.Thread.Mutex,
+    _: *std.Thread.Mutex,
 ) !void {
     while (true) {
         switch (st.phase) {

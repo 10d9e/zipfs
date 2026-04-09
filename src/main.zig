@@ -795,7 +795,7 @@ pub fn main() !void {
                 return error.BadArgs;
             };
             if (std.mem.eql(u8, manifest_cmd, "ls")) {
-                var manifests = try zipfs.manifest.Manifest.loadAll(gpa, repo_root);
+                const manifests = try zipfs.manifest.Manifest.loadAll(gpa, repo_root);
                 defer {
                     for (manifests) |*m| m.deinit(gpa);
                     gpa.free(manifests);

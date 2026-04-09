@@ -375,6 +375,7 @@ fn pushEntriesBatchedScheduler(
             batch_start = i;
             batch_size = 0;
         }
+        if (entry_size > 4 * 1024 * 1024) return error.MessageTooLong;
         batch_size += entry_size;
     }
 

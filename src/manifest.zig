@@ -104,7 +104,7 @@ pub const PeerProgress = struct {
     total_blocks: u64,
     pulled_blocks: u64,
     last_pulled_idx: u64,
-    last_activity_ns: i128,
+    last_activity_ns: i64,
     status: PeerStatus,
 };
 
@@ -114,8 +114,8 @@ pub const Manifest = struct {
     total_blocks: u64,
     total_bytes: u64,
     status: ManifestStatus,
-    created_ns: i128,
-    updated_ns: i128,
+    created_ns: i64,
+    updated_ns: i64,
     target_peers: []PeerProgress,
     replication_factor: u8,
 
@@ -256,15 +256,15 @@ fn parseManifestJson(allocator: std.mem.Allocator, data: []const u8) !Manifest {
         total_blocks: ?u64 = null,
         total_bytes: ?u64 = null,
         status: ?[]const u8 = null,
-        created_ns: ?i128 = null,
-        updated_ns: ?i128 = null,
+        created_ns: ?i64 = null,
+        updated_ns: ?i64 = null,
         replication_factor: ?u8 = null,
         target_peers: ?[]const struct {
             peer_addr: ?[]const u8 = null,
             total_blocks: ?u64 = null,
             pulled_blocks: ?u64 = null,
             last_pulled_idx: ?u64 = null,
-            last_activity_ns: ?i128 = null,
+            last_activity_ns: ?i64 = null,
             status: ?[]const u8 = null,
         } = null,
     };
@@ -305,8 +305,8 @@ fn parseManifestJson(allocator: std.mem.Allocator, data: []const u8) !Manifest {
         .total_blocks = v.total_blocks orelse 0,
         .total_bytes = v.total_bytes orelse 0,
         .status = if (v.status) |s| ManifestStatus.fromString(s) orelse .walking else .walking,
-        .created_ns = v.created_ns orelse std.time.nanoTimestamp(),
-        .updated_ns = v.updated_ns orelse std.time.nanoTimestamp(),
+        .created_ns = v.created_ns orelse @intCast(std.time.nanoTimestamp()),
+        .updated_ns = v.updated_ns orelse @intCast(std.time.nanoTimestamp()),
         .target_peers = try peers.toOwnedSlice(allocator),
         .replication_factor = v.replication_factor orelse 2,
     };
@@ -440,7 +440,13 @@ pub fn createManifest(
     target_peers: []const []const u8,
     repl_factor: u8,
 ) !Manifest {
-    const now = std.time.nanoTimestamp();
+    const now: i64 = @intCast(std.time.nanoTimestamp());
+
+    // Validate root_cid: reject path separators to prevent directory traversal
+    for (root_cid) |c| {
+        if (c == '/' or c == '\\' or c == 0) return error.InvalidCid;
+    }
+    if (std.mem.indexOf(u8, root_cid, "..") != null) return error.InvalidCid;
 
     // Ensure manifests directory exists
     const dir_path = try std.fs.path.join(allocator, &.{ repo_root, "manifests" });

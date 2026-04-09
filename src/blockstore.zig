@@ -58,6 +58,10 @@ pub const Blockstore = struct {
         const key = try c.toString(allocator);
         defer allocator.free(key);
 
+        // CID-addressed blocks are content-addressed: same CID guarantees same data.
+        // Skip redundant disk writes if the block already exists.
+        if (self.has(key)) return;
+
         // Write to disk
         if (self.repo_root) |root| {
             try writeBlockFile(root, key, data);
@@ -104,7 +108,8 @@ pub const Blockstore = struct {
         return repo.blockExistsOnDisk(root, key_utf8);
     }
 
-    pub fn count(self: *Blockstore) usize {
+    /// Returns the number of blocks in the in-memory cache (not total disk blocks).
+    pub fn cacheCount(self: *Blockstore) usize {
         self.cache_mu.lock();
         defer self.cache_mu.unlock();
         return self.cache_index.count();

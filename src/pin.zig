@@ -176,8 +176,16 @@ pub fn gc(allocator: std.mem.Allocator, store: *Blockstore, pins: *const PinSet,
     }
 
     {
+        var mark_failed = false;
         var it = pins.recursive.keyIterator();
-        while (it.next()) |k| markRecursive(allocator, store, k.*, &marked) catch {};
+        while (it.next()) |k| {
+            markRecursive(allocator, store, k.*, &marked) catch |err| {
+                std.log.err("gc: markRecursive failed for pin {s}: {}", .{ k.*, err });
+                mark_failed = true;
+            };
+        }
+        // If any recursive pin failed to mark, abort GC to prevent deleting pinned blocks.
+        if (mark_failed) return error.MarkFailed;
     }
     {
         var it = pins.direct.keyIterator();

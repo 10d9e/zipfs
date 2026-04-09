@@ -341,3 +341,44 @@ pub fn catFile(allocator: std.mem.Allocator, store: *Blockstore, root_key_utf8: 
     try catInto(allocator, store, root_key_utf8, &buf);
     return try buf.toOwnedSlice(allocator);
 }
+
+/// Stream file content to a writer without buffering the entire file in memory.
+/// Each leaf block is written directly to the writer as it's traversed.
+pub fn streamCatFile(allocator: std.mem.Allocator, store: *Blockstore, root_key_utf8: []const u8, writer: std.net.Stream) error{ OutOfMemory, NotFound, BadBlock, WriteError }!void {
+    try streamCatInto(allocator, store, root_key_utf8, writer);
+}
+
+fn streamCatInto(allocator: std.mem.Allocator, store: *Blockstore, key_utf8: []const u8, writer: std.net.Stream) error{ OutOfMemory, NotFound, BadBlock, WriteError }!void {
+    const block = store.get(allocator, key_utf8) orelse return error.NotFound;
+    defer allocator.free(block);
+
+    var root = Cid.parse(allocator, key_utf8) catch return error.BadBlock;
+    defer root.deinit(allocator);
+
+    if (root.codec == codec_raw) {
+        writer.writeAll(block) catch return error.WriteError;
+        return;
+    }
+    if (root.codec != codec_dag_pb) return error.BadBlock;
+
+    const parsed = parseDagPbNode(allocator, block) catch return error.BadBlock;
+    defer allocator.free(parsed.links);
+
+    const um = parsed.ufs_msg orelse return error.BadBlock;
+    const ufs = parseUnixFs(um) catch return error.BadBlock;
+
+    if (ufs.typ != unixfs_file) return error.BadBlock;
+
+    if (ufs.data.len > 0) {
+        writer.writeAll(ufs.data) catch return error.WriteError;
+        return;
+    }
+
+    for (parsed.links) |lnk| {
+        const child = Cid.fromBytes(allocator, lnk.hash) catch return error.BadBlock;
+        defer child.deinit(allocator);
+        const ck = child.toString(allocator) catch return error.BadBlock;
+        defer allocator.free(ck);
+        try streamCatInto(allocator, store, ck, writer);
+    }
+}

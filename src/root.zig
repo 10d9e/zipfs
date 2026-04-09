@@ -253,7 +253,7 @@ test "car export import roundtrip" {
     var f = try std.fs.cwd().openFile(tmp, .{});
     defer f.close();
     try car.importFromSeekableFile(gpa, f, &node2.store);
-    try std.testing.expectEqual(@as(usize, 2), node2.store.count());
+    try std.testing.expectEqual(@as(usize, 2), node2.store.cacheCount());
 }
 
 test "add cat chunked file" {

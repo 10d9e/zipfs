@@ -172,11 +172,17 @@ fn parseMultipartFile(body: []const u8, boundary: []const u8) ?struct { data: []
 /// `initial_body` is the portion already read after headers.
 /// Returns allocated body buffer that caller must free.
 fn readFullBody(allocator: std.mem.Allocator, stream: std.net.Stream, content_length: usize, initial_body: []const u8) ![]u8 {
-    const max_body: usize = 10 * 1024 * 1024 * 1024; // 10GB
+    // Cap at 2GB for in-memory buffering. The per-connection ArenaAllocator never frees
+    // individual allocations, so large bodies consume RAM until the handler returns.
+    // Use page_allocator directly for bodies >64MB so they can be freed immediately.
+    const max_body: usize = 2 * 1024 * 1024 * 1024;
     if (content_length > max_body) return error.PayloadTooLarge;
 
-    const body_buf = try allocator.alloc(u8, content_length);
-    errdefer allocator.free(body_buf);
+    // For large bodies, bypass the arena and allocate directly from page_allocator
+    // so the caller can actually reclaim memory with free().
+    const alloc = if (content_length > 64 * 1024 * 1024) std.heap.page_allocator else allocator;
+    const body_buf = try alloc.alloc(u8, content_length);
+    errdefer alloc.free(body_buf);
 
     // Copy what we already have
     const have = @min(initial_body.len, content_length);
@@ -275,10 +281,11 @@ fn handleAdd(allocator: std.mem.Allocator, ctx: *const GatewayCtx, stream: std.n
         return;
     };
 
-    // Read full body
+    // Read full body. readFullBody uses page_allocator for bodies >64MB so they
+    // can be freed immediately (arena allocator's free() is a no-op).
     const body = readFullBody(allocator, stream, content_length, initial_body) catch |err| switch (err) {
         error.PayloadTooLarge => {
-            sendResp(stream, "HTTP/1.1 413 Payload Too Large", "text/plain", "max upload size is 10GB\n");
+            sendResp(stream, "HTTP/1.1 413 Payload Too Large", "text/plain", "max upload size is 2GB\n");
             return;
         },
         else => {
@@ -286,7 +293,8 @@ fn handleAdd(allocator: std.mem.Allocator, ctx: *const GatewayCtx, stream: std.n
             return;
         },
     };
-    defer allocator.free(body);
+    const body_alloc = if (content_length > 64 * 1024 * 1024) std.heap.page_allocator else allocator;
+    defer body_alloc.free(body);
 
     // Extract file from multipart
     const parsed = parseMultipartFile(body, boundary) orelse {
@@ -721,8 +729,8 @@ fn handleConnection(ctx: *const GatewayCtx, stream: std.net.Stream, active: *std
         return;
     }
 
-    // No external lock — Blockstore is internally thread-safe via cache_mu
-    const body = resolver.catFileAtPath(allocator, ctx.store, cid_str, subpath) catch |err| switch (err) {
+    // Resolve path if subpath is present
+    const resolved_key = resolver.resolvePathToKey(allocator, ctx.store, cid_str, subpath) catch |err| switch (err) {
         error.NotFound => {
             sendResp(stream, "HTTP/1.1 404 Not Found", "text/plain", "not found\n");
             return;
@@ -736,8 +744,22 @@ fn handleConnection(ctx: *const GatewayCtx, stream: std.net.Stream, active: *std
             return;
         },
     };
-    defer allocator.free(body);
-    sendResp(stream, "HTTP/1.1 200 OK", "application/octet-stream", body);
+    defer allocator.free(resolved_key);
+
+    // Verify the block exists before committing to streaming (so we can send a proper 404)
+    if (!ctx.store.has(resolved_key)) {
+        sendResp(stream, "HTTP/1.1 404 Not Found", "text/plain", "not found\n");
+        return;
+    }
+
+    // Stream the file content directly to the socket without buffering.
+    // Uses Connection: close (already set) — client detects EOF by socket close.
+    // This avoids OOM for large files (500MB+) that can't fit in memory.
+    const hdr = "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n";
+    stream.writeAll(hdr) catch return;
+
+    // No external lock — Blockstore is internally thread-safe via cache_mu
+    resolver.streamCatFile(allocator, ctx.store, resolved_key, stream) catch return;
 }
 
 /// Multi-threaded accept loop: spawns a thread per connection up to max_conns.

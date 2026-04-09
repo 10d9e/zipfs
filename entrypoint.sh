@@ -1,6 +1,9 @@
 #!/bin/sh
 set -e
 
+# Ensure data directories exist
+mkdir -p "$IPFS_PATH/blocks" "$IPFS_PATH/manifests"
+
 # Write cluster config if CLUSTER_PEERS is set
 if [ -n "$CLUSTER_PEERS" ]; then
   cat > "$IPFS_PATH/config.json" <<CONF

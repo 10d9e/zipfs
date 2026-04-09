@@ -143,9 +143,8 @@ fn httpFetchBlock(
     cid_str: []const u8,
     cluster_secret: ?[]const u8,
 ) ![]u8 {
-    // Connect
-    const addr = try std.net.Address.parseIp(host, port);
-    const stream = try std.net.tcpConnectToAddress(addr);
+    // Connect (use tcpConnectToHost to support DNS names, not just IP literals)
+    const stream = try std.net.tcpConnectToHost(allocator, host, port);
     defer stream.close();
 
     // Build request
@@ -316,7 +315,7 @@ fn pullOnce(allocator: std.mem.Allocator, ctx: *const PullCtx) void {
             var m = loaded;
             defer m.deinit(allocator);
             m.status = .complete;
-            m.updated_ns = std.time.nanoTimestamp();
+            m.updated_ns = @intCast(std.time.nanoTimestamp());
             m.save(allocator, ctx.repo_root) catch {};
         } else |_| {}
 
