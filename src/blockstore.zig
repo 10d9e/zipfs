@@ -55,6 +55,12 @@ pub const Blockstore = struct {
     }
 
     pub fn put(self: *Blockstore, allocator: std.mem.Allocator, c: Cid, data: []const u8) !void {
+        // Ephemeral nodes (tests, REPL) often omit repo_root and initCache; without one of
+        // them, cacheInsert is a no-op and blocks would be dropped on the floor.
+        if (self.cache == null and self.repo_root == null) {
+            try self.initCache(allocator, 1024);
+        }
+
         const key = try c.toString(allocator);
         defer allocator.free(key);
 

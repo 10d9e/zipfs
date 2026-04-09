@@ -239,8 +239,16 @@ test "peer id from key" {
 
 test "car export import roundtrip" {
     const gpa = std.testing.allocator;
+    var tmp_repo = std.testing.tmpDir(.{});
+    defer tmp_repo.cleanup();
+    const repo_path = try tmp_repo.dir.realpathAlloc(gpa, ".");
+    defer gpa.free(repo_path);
+
     var node: Node = .{};
     defer node.deinit(gpa);
+    node.store.repo_root = repo_path;
+    try node.store.initCache(gpa, 256);
+
     const c1 = try node.blockPut(gpa, "block-a");
     defer c1.deinit(gpa);
     const c2 = try node.blockPut(gpa, "block-bbb");
