@@ -128,16 +128,25 @@ pub const Blockstore = struct {
             self.cache_mu.lock();
             defer self.cache_mu.unlock();
             if (self.cache_index.fetchRemove(key_utf8)) |kv| {
-                const ca = self.cache_allocator orelse return false;
-                // kv.key is shared with slot entry.key — free via slot only
+                const ca = self.cache_allocator orelse {
+                    // cache_allocator must be set whenever cache_index has entries.
+                    // Panic unconditionally so the invariant is enforced in all build
+                    // modes — a debug.assert would be silently elided in ReleaseFast,
+                    // leaving kv.key leaked and the violation undetected.
+                    std.debug.panic("Blockstore: cache_index has entries but cache_allocator is null", .{});
+                };
+                // kv.key is shared with slot entry.key (same allocation).
+                // Free it once below, after nulling the slot.
                 if (self.cache) |slots| {
                     if (slots[kv.value]) |entry| {
-                        ca.free(entry.key);
                         ca.free(entry.data);
                         slots[kv.value] = null;
                     }
+                    // Always free kv.key: covers both the normal path (slot was set,
+                    // entry.key == kv.key) and the defensive path (slot already null).
+                    ca.free(kv.key);
                 } else {
-                    // No slots but index had entry — free the shared key
+                    // No slots array — the index had a dangling entry; free the key.
                     ca.free(kv.key);
                 }
             }
@@ -214,3 +223,104 @@ pub const Blockstore = struct {
         file.close();
     }
 };
+
+// ---------------------------------------------------------------------------
+// Unit tests
+// ---------------------------------------------------------------------------
+
+test "blockstore: remove frees key for every occupied slot" {
+    const ally = std.testing.allocator;
+
+    var bs = Blockstore{};
+    try bs.initCache(ally, 4);
+    defer {
+        // deinit only cleans entries still in the cache; we test remove separately.
+        const ca = bs.cache_allocator.?;
+        if (bs.cache) |slots| {
+            for (slots) |slot| {
+                if (slot) |entry| {
+                    ca.free(entry.key);
+                    ca.free(entry.data);
+                }
+            }
+            ca.free(slots);
+            bs.cache_index.deinit(ca);
+        }
+    }
+
+    // Insert three entries.
+    bs.cacheInsert("cid1", "data1");
+    bs.cacheInsert("cid2", "data2");
+    bs.cacheInsert("cid3", "data3");
+
+    try std.testing.expect(bs.has("cid1"));
+    try std.testing.expect(bs.has("cid2"));
+    try std.testing.expect(bs.has("cid3"));
+
+    // remove() should leave the cache in a consistent state and not leak.
+    // (The testing allocator will detect leaks on scope exit.)
+    _ = bs.remove(ally, "cid1");
+    try std.testing.expect(!bs.cache_index.contains("cid1"));
+
+    _ = bs.remove(ally, "cid2");
+    try std.testing.expect(!bs.cache_index.contains("cid2"));
+
+    // cid3 is still present.
+    try std.testing.expect(bs.has("cid3"));
+    _ = bs.remove(ally, "cid3");
+    try std.testing.expect(!bs.cache_index.contains("cid3"));
+}
+
+test "blockstore: remove of absent key is a no-op" {
+    const ally = std.testing.allocator;
+
+    var bs = Blockstore{};
+    try bs.initCache(ally, 4);
+    defer {
+        const ca = bs.cache_allocator.?;
+        if (bs.cache) |slots| {
+            for (slots) |slot| {
+                if (slot) |entry| {
+                    ca.free(entry.key);
+                    ca.free(entry.data);
+                }
+            }
+            ca.free(slots);
+            bs.cache_index.deinit(ca);
+        }
+    }
+
+    // remove a key that was never inserted — must not crash or leak.
+    const removed = bs.remove(ally, "nonexistent");
+    try std.testing.expect(!removed);
+}
+
+test "blockstore: cache eviction frees old entry on wrap-around" {
+    const ally = std.testing.allocator;
+
+    // Capacity = 2 so we can force eviction quickly.
+    var bs = Blockstore{};
+    try bs.initCache(ally, 2);
+    defer {
+        const ca = bs.cache_allocator.?;
+        if (bs.cache) |slots| {
+            for (slots) |slot| {
+                if (slot) |entry| {
+                    ca.free(entry.key);
+                    ca.free(entry.data);
+                }
+            }
+            ca.free(slots);
+            bs.cache_index.deinit(ca);
+        }
+    }
+
+    bs.cacheInsert("a", "aaa");
+    bs.cacheInsert("b", "bbb");
+    // Third insert evicts "a" (FIFO, slot 0 wraps).
+    bs.cacheInsert("c", "ccc");
+
+    // "a" was evicted; "b" and "c" must both still be present.
+    try std.testing.expect(!bs.cache_index.contains("a"));
+    try std.testing.expect(bs.cache_index.contains("b") and bs.cache_index.contains("c"));
+}

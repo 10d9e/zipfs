@@ -29,6 +29,18 @@ fn ringPosition(key: []const u8) u256 {
     return result;
 }
 
+/// Chord distance between two u256 ring positions.
+/// Extracted for unit testing; external callers use selectPeersConsistentHash.
+fn ringDist(a: u256, b: u256) u256 {
+    const raw = if (a >= b) a - b else b - a;
+    if (raw == 0) return 0;
+    const max_u256: u256 = std.math.maxInt(u256);
+    // counter-clockwise arc = 2^256 - raw = (max_u256 - raw) + 1
+    // The +1 is safe: raw > 0 guarantees (max_u256 - raw) <= max_u256 - 1.
+    const ccw: u256 = (max_u256 - raw) + 1;
+    return @min(raw, ccw);
+}
+
 /// Select N peers from alive peers using consistent hashing on the CID.
 /// Skips peers already in `exclude`.
 pub fn selectPeersConsistentHash(
@@ -61,11 +73,7 @@ pub fn selectPeersConsistentHash(
         if (excluded) continue;
 
         const pos = ringPosition(p.addr);
-        const raw_dist = if (pos >= target) pos - target else target - pos;
-        const dist = if (raw_dist == 0) @as(u256, 0) else blk: {
-            const max_u256: u256 = std.math.maxInt(u256);
-            break :blk @min(raw_dist, max_u256 - raw_dist + 1);
-        };
+        const dist = ringDist(pos, target);
         try scored.append(allocator, .{ .peer = p, .distance = dist });
     }
 
@@ -852,4 +860,46 @@ fn monitorManifests(allocator: std.mem.Allocator, ctx: *SelfHealCtx) void {
             };
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests
+// ---------------------------------------------------------------------------
+
+test "ringDist: same position is zero" {
+    try std.testing.expectEqual(@as(u256, 0), ringDist(0, 0));
+    try std.testing.expectEqual(@as(u256, 0), ringDist(42, 42));
+    const max: u256 = std.math.maxInt(u256);
+    try std.testing.expectEqual(@as(u256, 0), ringDist(max, max));
+}
+
+test "ringDist: symmetric" {
+    try std.testing.expectEqual(ringDist(10, 3), ringDist(3, 10));
+    try std.testing.expectEqual(ringDist(1000, 1), ringDist(1, 1000));
+}
+
+test "ringDist: prefers shorter arc" {
+    // On a ring of size 2^256, distance between 1 and max_u256 is 2
+    // (counter-clockwise: 1 -> 0 -> max_u256).
+    const max: u256 = std.math.maxInt(u256);
+    try std.testing.expectEqual(@as(u256, 2), ringDist(1, max));
+    try std.testing.expectEqual(@as(u256, 2), ringDist(max, 1));
+}
+
+test "ringDist: midpoint is exactly half the ring" {
+    // Two positions that are exactly half the ring apart have equal arc lengths.
+    // For a u256 ring, half = 2^255.
+    const half: u256 = 1 << 255;
+    // dist(0, half) should equal half (both arcs are the same length).
+    // The ring has 2^256 positions; each arc = 2^255.
+    // max_u256 - half + 1 = (2^256-1) - 2^255 + 1 = 2^255.
+    try std.testing.expectEqual(half, ringDist(0, half));
+}
+
+test "ringDist: adjacent positions" {
+    try std.testing.expectEqual(@as(u256, 1), ringDist(0, 1));
+    try std.testing.expectEqual(@as(u256, 1), ringDist(1, 0));
+    const max: u256 = std.math.maxInt(u256);
+    try std.testing.expectEqual(@as(u256, 1), ringDist(max, 0));
+    try std.testing.expectEqual(@as(u256, 1), ringDist(0, max));
 }
