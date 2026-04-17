@@ -30,7 +30,7 @@ fn ringPosition(key: []const u8) u256 {
 }
 
 /// Chord distance between two u256 ring positions.
-/// Exposed for testing; callers outside this module use selectPeersConsistentHash.
+/// Extracted for unit testing; external callers use selectPeersConsistentHash.
 fn ringDist(a: u256, b: u256) u256 {
     const raw = if (a >= b) a - b else b - a;
     if (raw == 0) return 0;

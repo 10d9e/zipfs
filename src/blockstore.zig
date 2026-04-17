@@ -130,10 +130,10 @@ pub const Blockstore = struct {
             if (self.cache_index.fetchRemove(key_utf8)) |kv| {
                 const ca = self.cache_allocator orelse {
                     // cache_allocator must be set whenever cache_index has entries.
-                    // This branch is unreachable under normal use but guards against
-                    // future misuse; without it, kv.key would leak.
-                    std.debug.assert(false);
-                    return false;
+                    // Panic unconditionally so the invariant is enforced in all build
+                    // modes — a debug.assert would be silently elided in ReleaseFast,
+                    // leaving kv.key leaked and the violation undetected.
+                    std.debug.panic("Blockstore: cache_index has entries but cache_allocator is null", .{});
                 };
                 // kv.key is shared with slot entry.key (same allocation).
                 // Free it once below, after nulling the slot.
@@ -320,7 +320,7 @@ test "blockstore: cache eviction frees old entry on wrap-around" {
     // Third insert evicts "a" (FIFO, slot 0 wraps).
     bs.cacheInsert("c", "ccc");
 
-    // "a" was evicted; "b" and "c" should still be present.
+    // "a" was evicted; "b" and "c" must both still be present.
     try std.testing.expect(!bs.cache_index.contains("a"));
-    try std.testing.expect(bs.cache_index.contains("b") or bs.cache_index.contains("c"));
+    try std.testing.expect(bs.cache_index.contains("b") and bs.cache_index.contains("c"));
 }
