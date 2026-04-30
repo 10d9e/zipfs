@@ -449,7 +449,29 @@ pub fn main() !void {
                     };
                     _ = try std.Thread.spawn(.{}, zipfs.pull_engine.pullWorkerLoop, .{&pull_ctx});
                 }
+
+                // Replication audit loop (periodically confirms peers have blocks)
+                var repl_audit_ctx = zipfs.repl_audit.AuditCtx{
+                    .repo_root = try gpa.dupe(u8, repo_root),
+                    .state_mu = &state_mu,
+                    .ed25519_secret64 = sec,
+                    .cluster_secret = cfg.cluster_secret,
+                    .queue = &repl_q,
+                    .cluster_mode = c_mode,
+                    .replication_factor = repl_factor,
+                };
+                _ = try std.Thread.spawn(.{}, zipfs.repl_audit.auditLoop, .{&repl_audit_ctx});
             }
+
+            // Audit log (always enabled in daemon mode)
+            var audit_logger = try zipfs.audit_log.AuditLog.init(
+                gpa,
+                repo_root,
+                true,
+                100,
+                90,
+            );
+            try audit_logger.startWriter();
 
             try stderr.print("zipfs {s} daemon starting...\n", .{zipfs.version.semver});
             try printPeerIdP2pLine(gpa, stderr, sec);
