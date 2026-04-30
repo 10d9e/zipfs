@@ -3,3 +3,12 @@
 .zig-cache/
 zig-out/
 *.o
+
+# IDE/editor
+.claude/
+
+# Deploy artifacts
+docker-compose.local.yml
+
+# Rust scaffold (removed)
+kipfs-rust/

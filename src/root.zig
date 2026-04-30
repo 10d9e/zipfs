@@ -4,6 +4,7 @@ const std = @import("std");
 pub const version = @import("version.zig");
 const wireproto = @import("wireproto.zig");
 
+pub const audit_log = @import("audit_log.zig");
 pub const varint = @import("varint.zig");
 pub const multihash = @import("multihash.zig");
 pub const multibase = @import("multibase.zig");
@@ -41,6 +42,7 @@ pub const net_cluster_push = @import("net/cluster_push.zig");
 pub const net_conn_pool = @import("net/conn_pool.zig");
 pub const cluster = @import("cluster.zig");
 pub const replication = @import("replication.zig");
+pub const repl_audit = @import("repl_audit.zig");
 pub const repl_queue = @import("repl_queue.zig");
 pub const repl_scheduler = @import("repl_scheduler.zig");
 pub const manifest = @import("manifest.zig");
